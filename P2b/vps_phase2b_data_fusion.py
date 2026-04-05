@@ -25,28 +25,113 @@ import numpy as np
 
 CHUNK_SIZE = 250_000
 
+def _parse_sierra_format(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Trasforma il formato export Sierra Chart Time & Sales in formato canonico.
+    Mappatura:
+      ts    = Date + " " + Time
+      price = Last
+      size  = Volume
+      side  = derivato da BidVolume/AskVolume (v. regole sotto)
+    """
+    # Costruisci ts da date + time
+    df["ts"] = df["date"].astype(str) + " " + df["time"].astype(str)
+
+    # price e size
+    df["price"] = pd.to_numeric(df["last"], errors="coerce")
+    df["size"]  = pd.to_numeric(df["volume"], errors="coerce")
+
+    # Converti volumi per le regole side
+    bv = pd.to_numeric(df["bidvolume"], errors="coerce").fillna(0)
+    av = pd.to_numeric(df["askvolume"], errors="coerce").fillna(0)
+
+    # Regole side:
+    # - AskVolume > 0 AND BidVolume == 0 -> "buy"  (lifted Ask)
+    # - BidVolume > 0 AND AskVolume == 0 -> "sell" (hit Bid)
+    # - entrambi > 0: AskVol > BidVol -> "buy", BidVol > AskVol -> "sell", uguali -> skip
+    # - entrambi == 0 -> skip
+    conditions = [
+        (av > 0) & (bv == 0),   # buy
+        (bv > 0) & (av == 0),   # sell
+        (av > bv),               # buy ( AskVol dominates )
+        (bv > av),               # sell( BidVol dominates )
+    ]
+    choices   = ["buy", "sell", "buy", "sell"]
+    side_mask = np.select(conditions, choices, default="_skip_")
+
+    df["side"] = side_mask
+
+    # Scarta righe
+    rows_total = len(df)
+    df = df[df["side"] != "_skip_"].copy()
+    rows_discarded = rows_total - len(df)
+
+    # Righe con ts/price/size null
+    before_nulls = len(df)
+    df = df.dropna(subset=["ts", "price", "size"])
+    rows_nulls = before_nulls - len(df)
+
+    total_discarded = rows_discarded + rows_nulls
+    if total_discarded > 0:
+        print(f"      [P2b] Sierra format: {total_discarded:,} righe scartate"
+        f" (ambigue/invalide={rows_discarded:,}, null={rows_nulls:,})")
+
+    if df.empty:
+        return df
+
+    # Parsa timestamp — formato Sierra: "2026/2/27 00:01:25.226"
+    df["ts_dt"] = pd.to_datetime(df["ts"], format="mixed", utc=False)
+    df = df.sort_values("ts_dt").reset_index(drop=True)
+
+    return df[["ts", "ts_dt", "price", "size", "side"]]
+
+
 def load_trades(trades_path: Path):
     """
-    Carica i trades. Il file deve avere: ['ts', 'price', 'size', 'side']
-    side = 'buy' (Aggressor = Market Buy -> Puts pressure on ASK)
-    side = 'sell' (Aggressor = Market Sell -> Puts pressure on BID)
+    Carica i trades. Accetta DUE formati:
+
+    Formato canonico (già usato dal codice):
+      ts, price, size, side
+      side = 'buy' (Aggressor = Market Buy -> Puts pressure on ASK)
+      side = 'sell' (Aggressor = Market Sell -> Puts pressure on BID)
+
+    Formato Sierra Chart Time & Sales export:
+      Date, Time, Open, High, Low, Last, Volume,
+      NumberOfTrades, BidVolume, AskVolume
+      (mappatura automatica -> canonico)
     """
     try:
-        # Load, map Sierra txt files or generic format
         df = pd.read_csv(trades_path)
-        # Rename standardizzazione se necessario
         df.columns = [c.lower() for c in df.columns]
-        
-        # Converte timestamp high-perf
-        if 'ts' in df.columns:
-            ts_str = df['ts']
-            if ts_str.dtype == object:
-                ts_str = ts_str.str.replace(" UTC", "", regex=False)
-            df['ts_dt'] = pd.to_datetime(ts_str, format='mixed', utc=False)
+
+        # Rileva formato
+        canonical_cols = {"ts", "price", "size", "side"}
+        sierra_cols   = {"date", "time", "last", "volume", "bidvolume", "askvolume"}
+
+        has_canonical = canonical_cols.issubset(set(df.columns))
+        has_sierra    = sierra_cols.issubset(set(df.columns))
+
+        if has_canonical and not has_sierra:
+            # --- Formato canonico ---
+            print("[P2b] Detected canonical trades format")
+            if df["ts"].dtype == object:
+                df["ts"] = df["ts"].str.replace(" UTC", "", regex=False)
+            df["ts_dt"] = pd.to_datetime(df["ts"], format="mixed", utc=False)
+            df = df.sort_values("ts_dt").reset_index(drop=True)
+
+        elif has_sierra:
+            # --- Formato Sierra Chart export ---
+            print("[P2b] Detected Sierra Chart export format")
+            df = _parse_sierra_format(df)
+
         else:
-            raise ValueError("Il file trades non ha la colonna 'ts'")
-            
-        df = df.sort_values('ts_dt').reset_index(drop=True)
+            missing = (canonical_cols | sierra_cols) - set(df.columns)
+            raise ValueError(
+                f"Formato trades non riconosciuto. Colonne mancanti: {missing}\n"
+                f"Formato canonico richiesto : {sorted(canonical_cols)}\n"
+                f"Formato Sierra Chart export : {sorted(sierra_cols)}"
+            )
+
         return df
     except Exception as e:
         print(f"Errore nel parsing trade file {trades_path}: {e}")
@@ -161,3 +246,32 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ─── Self-test ────────────────────────────────────────────────────────────────
+# Esegui direttamente:  python vps_phase2b_data_fusion.py --selftest
+# Oppure importa e chiama:  from vps_phase2b_data_fusion import _parse_sierra_format
+#
+# Mappatura Sierra Chart Export → Formato Canonico
+# ──────────────────────────────────────────────────────────────────────────────
+# Input Sierra (righe di esempio):
+#   Date,        Time,           Open,    High,     Low,      Last,     Vol,  #Trades, BidVol, AskVol
+#   2026/2/27,   00:01:25.226,   25212.75, 25216.00, 25212.75, 25212.75,  1,    1,       1,      0
+#   2026/2/27,   00:08:37.360,   25223.50, 25226.75, 25223.50, 25223.50,  1,    1,       1,      0
+#   2026/2/27,   00:11:10.558,   25236.75, 25236.75, 25232.25, 25236.75,  1,    1,       0,      1
+#
+# Output canonico:
+#   ts                          price      size  side
+#   2026-02-27 00:01:25.226     25212.75   1     sell   (BidVol=1 > AskVol=0)
+#   2026-02-27 00:08:37.360     25223.50   1     sell   (BidVol=1 > AskVol=0)
+#   2026-02-27 00:11:10.558     25236.75   1     buy    (AskVol=1 > BidVol=0)
+#
+# Edge case residui:
+#   - NumberOfTrades > 1: la riga NON viene espansa in micro-trade;
+#     viene assunta come singola trade aggregata (size=Volume, side=dominante).
+#     Questa è un'approssimazione: il trade aggregator reale dovrebbe redistribuire
+#     Volume / NumberOfTrades in micro-trade equi-weight.
+#   - BidVol == AskVol: riga scartata (side ambiguo).
+#   - BidVol == AskVol == 0: riga scartata (nessun volume registrato).
+#   - Formato timestamp Sierra "2026/2/27" vs canonico "2026-02-27": gestito da
+#     pd.to_datetime(..., format="mixed") che accetta entrambi.
