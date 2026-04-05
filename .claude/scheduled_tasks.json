@@ -1,0 +1,12 @@
+{
+  "tasks": [
+    {
+      "id": "e19b6eef",
+      "cron": "*/2 * * * *",
+      "prompt": "Check if the depth-dom pipeline on VPS (185.185.82.205) has finished processing all 5 days. Run this expect command:\n\n```\ncd \"/Users/paolo/Desktop/DEPTH DOM VPS\" && expect << 'EOF'\nset timeout 30\nspawn ssh -o StrictHostKeyChecking=no root@185.185.82.205 \"tail -3 /opt/depth-dom/pipeline_full3.log 2>&1; echo '---'; wc -l /opt/depth-dom/output/2025-12-18/sampled_events.csv 2>&1\"\nexpect {\n    \"password:\" {\n        send \"782789Pao!\\r\"\n        expect eof\n    }\n}\nEOF\n```\n\nIf you see \"Phase 6\" or \"Phase 6 completed\" in the output, or if all 5 days show sampled_events.csv files, the pipeline is DONE. Reply with \"Pipeline completato!\" and the final statistics.\n\nIf still running (showing Pass 2 or Phase numbers), do NOT reply — just let the cron job fire again in 2 minutes.",
+      "createdAt": 1775123543034,
+      "lastFiredAt": 1775376208083,
+      "recurring": true
+    }
+  ]
+}

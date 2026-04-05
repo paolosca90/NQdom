@@ -1,0 +1,12 @@
+.DS_Store
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.vscode/
+.idea/
+*.log
+pipeline_full*.log
+p7p8_run*.log
+cron_orchestrator*.log
