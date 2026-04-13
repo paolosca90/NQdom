@@ -237,6 +237,84 @@ def read_records(fh: BinaryIO) -> tuple[list[DepthRecord], list[str]]:
     return records, warnings_list
 
 
+def records_to_csv_stream_filtered(
+    fh_in: BinaryIO,
+    writer,
+    start_utc_hour: int,
+    start_utc_min: int,
+    end_utc_hour: int,
+    end_utc_min: int,
+    progress_every: int = 500_000,
+) -> tuple[int, int, list[str]]:
+    """
+    Stream-parse a .depth file and write CSV rows ONLY for records
+    within the UTC time window [start, end].
+    Returns (written_count, total_records, warnings).
+    """
+    import struct
+    from datetime import time
+
+    warnings_list = []
+    unknown_commands = set()
+    index = 0
+    written = 0
+
+    RECORD_FORMAT = "<q BB H f I I"
+    start_time = time(start_utc_hour, start_utc_min, 0)
+    end_time = time(end_utc_hour, end_utc_min, 0)
+
+    fh_in.seek(HEADER_SIZE)
+
+    while True:
+        raw = fh_in.read(RECORD_SIZE)
+        if len(raw) == 0:
+            break
+        if len(raw) < RECORD_SIZE:
+            warnings_list.append(f"Truncated record at index {index}")
+            break
+
+        try:
+            data = struct.unpack(RECORD_FORMAT, raw)
+        except struct.error as e:
+            warnings_list.append(f"Unpack error at index {index}: {e}")
+            break
+
+        command_code = data[1]
+        if command_code not in COMMAND_NAMES:
+            unknown_commands.add(command_code)
+
+        dt_utc = _decode_sierra_datetime(data[0])
+        record_time = dt_utc.time()
+
+        if not (start_time <= record_time <= end_time):
+            index += 1
+            continue
+
+        rec_dict = {
+            "record_index": index,
+            "datetime_raw": data[0],
+            "datetime_utc": dt_utc.strftime("%Y-%m-%d %H:%M:%S.%f") + " UTC",
+            "command_code": command_code,
+            "command_name": COMMAND_NAMES.get(command_code, f"UNKNOWN_{command_code}"),
+            "flags": data[2],
+            "end_of_batch": bool(data[2] & FLAG_END_OF_BATCH),
+            "num_orders": data[3],
+            "price": round(data[4], 4),
+            "quantity": data[5],
+        }
+        writer.writerow(rec_dict)
+        written += 1
+        index += 1
+
+        if index % progress_every == 0:
+            print(f"    ... parsed {index:,} records, written {written:,}")
+
+    for cmd in sorted(unknown_commands):
+        warnings_list.append(f"Unknown command code: {cmd}")
+
+    return written, index, warnings_list
+
+
 def records_to_csv_stream(
     fh_in: BinaryIO,
     writer,

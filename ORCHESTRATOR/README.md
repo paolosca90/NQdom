@@ -15,6 +15,7 @@ python3 vps_multiday_runner.py --workers 4 --resume       # resume
 Esegue P7+P8 per giorni con P1-P6 completo ma P7/P8 mancante.
 Checkpoint sentinel per idempotenza. Genera automaticamente `snapshots.csv`
 da `events.csv` se mancante (gap del vecchio pipeline Dec 2025).
+**Nota:** P7b (Macro Filter) è stato deprecato e rimosso.
 
 ```bash
 python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --workers 4

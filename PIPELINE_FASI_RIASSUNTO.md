@@ -1,9 +1,10 @@
 # DEPTH-DOM Pipeline — Riepilogo Fasi
 
-**Data:** 2026-04-04
+**Data:** 2026-04-12
 **Pipeline:** 12 fasi per la generazione di segnali di trading ML-ready
 **Input:** File `.depth` binari Sierra Chart (NQ futures)
 **Output:** Modelli ML + bridge live per esecuzione in Sierra Chart
+**Riferimento architetturale:** Deep LOB NotebookLM (NotebookLM, 288 sources)
 
 ---
 
@@ -14,55 +15,39 @@ DEPTH DOM VPS/
 │
 ├── CLAUDE.md                     ← istruzioni progetto per Claude Code
 ├── PIPELINE_FASI_RIASSUNTO.md   ← questo file
+├── run_p1_to_p7_multiday.py    ← orchestrator P1→P7 (con P2b)
 │
 ├── P1/   depth_parser.py, main.py, README.md
-├── P2/   vps_book_reconstructor.py, vps_book_reconstructor_fullnumba.py, README.md
-├── P2b/  vps_phase2b_data_fusion.py, README.md
+├── P2/   vps_book_reconstructor.py, README.md
+├── P2b/  vps_phase2b_data_fusion.py, compute_ts_features.py,
+│         split_sierra_trades_by_day.py, README.md
 ├── P3/   vps_feature_engineering_vectorized.py, README.md
 ├── P4/   vps_feature_engineering_agg.py, README.md
 ├── P5/   vps_cusum_sampler.py, README.md
 ├── P6/   vps_excursion_analysis_vectorized.py, README.md
 ├── P7/   vps_phase7_labeling.py, README.md
-├── P7b/  vps_phase7b_macro_filter.py, README.md
 ├── P8/   vps_phase8_entry_model.py, README.md
 ├── P11/  vps_phase11_rl_execution.py, README.md
 ├── P12/  vps_phase12_sierra_bridge.py, README.md
 │
 ├── SHARED/
-│   ├── _pipeline_constants.py     ← costanti condivise (CANDIDATES, helpers)
-│   ├── utils.py                  ← utilities condivise
+│   ├── _pipeline_constants.py     ← costanti condivise (CANDIDATES, ALL_FEATURE_PATTERNS, helpers)
 │   └── README.md
 │
 ├── ORCHESTRATOR/
-│   ├── vps_multiday_runner.py    ← batch orchestrator
+│   ├── vps_multiday_runner.py    ← batch orchestrator P1-P8 (full)
 │   ├── incremental_p7p8_runner.py ← runner P7/P8 incrementale
-│   ├── aggregate_results.py      ← aggregazione risultati
-│   ├── plot_dashboard.py        ← dashboard plotting
-│   ├── audit_pipeline.py         ← audit pipeline
-│   ├── status_live.py            ← status live
-│   ├── vps_watchdog.sh          ← watchdog
-│   ├── cron_orchestrator.sh      ← cron 30-min orchestrator
+│   ├── aggregate_results.py        ← aggregazione risultati
+│   ├── plot_dashboard.py         ← dashboard plotting
+│   ├── audit_pipeline.py          ← audit pipeline
+│   ├── status_live.py             ← status live
+│   ├── vps_watchdog.sh           ← watchdog
+│   ├── cron_orchestrator.sh       ← cron 30-min orchestrator
 │   └── README.md
 │
-├── INPUT/                        ← .depth source files (25 giorni)
+├── INPUT/                        ← .depth source files
 │
-├── VPS: /opt/depth-dom/  ← 24 script Python + 3 shell, flat
-│         • depth_parser.py, main.py, aggregate_results.py, plot_dashboard.py
-│         • vps_book_reconstructor.py (P2)
-│         • vps_feature_engineering_vectorized.py (P3)
-│         • vps_feature_engineering_agg.py (P4)
-│         • vps_cusum_sampler.py (P5)
-│         • vps_excursion_analysis_vectorized.py (P6)
-│         • vps_phase7_labeling.py (P7)
-│         • vps_phase7b_macro_filter.py (P7b)
-│         • vps_phase8_entry_model.py (P8)
-│         • vps_phase11_rl_execution.py (P11)
-│         • vps_phase12_sierra_bridge.py (P12)
-│         • vps_phase2b_data_fusion.py (P2b)
-│         • vps_multiday_runner.py, vps_multiday_aggregator.py
-│         • incremental_p7p8_runner.py, audit_pipeline.py, status_live.py
-│         • _pipeline_constants.py, utils.py
-│         • cron_orchestrator.sh, vps_watchdog.sh, archive_completed_day_v2.sh
+├── VPS: /opt/depth-dom/  ← pipeline completo, flat
 ```
 
 ---
@@ -70,35 +55,74 @@ DEPTH DOM VPS/
 ## Panoramica del Pipeline
 
 ```
-.depth (binario)
+.depth (binario Sierra Chart)
   │
-  ▼ P1 ──► events.csv                    (~50-100 MB/giorno)
+  ▼ P1 ──► events.csv                    (~45 MB/giorno)
   │         │
   ▼ P2 ──► snapshots.csv                 (~427 MB/giorno)
   │         │
-  ▼ P2b ─► snapshots_fused.csv           (LOB + Time & Sales)
+  ▼ P2b ─► snapshots_fused.csv         (LOB + Time & Sales fusion)
   │         │
   ▼ P3 ──► features_dom.csv              (~310 MB/giorno)
   │         │
-  ▼ P4 ──► features_dom_agg.csv
+  ▼ P4 ──► features_dom_agg.csv          (~50 MB/giorno)
   │         │
-  ▼ P5 ──► sampled_events.csv             (~1% degli eventi)
+  ▼ P5 ──► sampled_events.csv            (~31 MB/giorno, ~1% eventi)
   │         │
-  ▼ P6 ──► excursion_stats.csv
+  ▼ P6 ──► excursion_stats.csv          (~15 MB/giorno)
   │         │
   ▼ P7 ──► phase7_labels_*/              (3 candidati triple-barrier)
   │         │
-  ▼ P7b ─► *_gex_pos.csv / *_gex_neg.csv (filtro macro)
-  │         │
-  ▼ P8 ──► model.pkl + report
+  ▼ P8 ──► model.pkl + report            (ML entry model)
   │
-  ▼ P11 ─► Agente RL Actor-Critic         (live service)
+  ▼ P11 ─► Agente RL Actor-Critic        (live service)
   │
-  ▼ P12 ─► Bridge TCP ──► Sierra Chart    (live service)
+  ▼ P12 ─► Bridge TCP ──► Sierra Chart   (live service)
 ```
 
 **Hardware VPS:** Contabo Cloud VPS 30 SSD — 8 core, 24GB RAM, 400GB SSD
 **VPS:** `root@185.185.82.205` — codice in `/opt/depth-dom/`
+
+---
+
+## Architettura DeepLOB (Apr 2026)
+
+Riferimento: NotebookLM "Deep Limit Order Book Forecasting and Market Microstructure Analysis" (288 sources, aggiornato Apr 10, 2026)
+
+### Orari di Trading
+
+| Parametro | Valore | Note |
+|-----------|--------|------|
+| RTH (ET) | 09:30–16:00 | Regular Trading Hours |
+| **Finestra filtrata (ET)** | **09:40–15:50** | Esclude asta apertura/chiusura (±10 min) |
+| UTC (EDT=UTC-4) | 13:40–19:50 | Corretto per fuso marzo-aprile |
+
+### Cadenza di Esecuzione
+
+| Parametro | Valore |
+|-----------|--------|
+| Apertura posizioni | Ogni 5 minuti |
+| Prima finestra entry | 09:45 ET |
+| Ultima finestra entry | 15:30 ET |
+| Inizio uscita forzata | 15:55 ET |
+| Chiusura completa | 16:00 ET |
+
+### Neutral Band
+
+- **±2 basis points** attorno a 0 sulla finestra di averaging a 5 minuti
+- Definisce la soglia tra "flat" e direzione (up/down)
+
+### Costi di Transazione
+
+| Contract | Costo round-turn |
+|----------|-----------------|
+| NQ | ~8 tick / ~$40 |
+| ES | ~2 tick / ~$25 |
+
+### Soglia PT per Deep Neural Nets
+
+- **PT OOS ≥ 53%** richiesto prima di escalation a CNN+LSTM (UCL DeepLOB paper)
+- Baseline: XGBoost/LightGBM deve superare questa soglia su test set
 
 ---
 
@@ -188,9 +212,9 @@ ask_px_1..10, ask_qty_1..10
 
 ## Fase 2b — Data Fusion (LOB + Time & Sales)
 
-**Script:** `OPTIMIZATIONS/vps_phase2b_data_fusion.py`
+**Script:** `P2b/vps_phase2b_data_fusion.py`
 
-**Input:** `snapshots.csv` + trades.csv (esterno, es. Sierra Chart T&S)
+**Input:** `snapshots.csv` + `trades.csv` (esterno, es. Sierra Chart T&S)
 **Output:** `snapshots_fused.csv` (o sovrascrive snapshots.csv)
 
 ### Perché Serve
@@ -210,7 +234,11 @@ Quando `bid_qty_1` scende, non sappiamo se è:
 - Per ogni snapshot, associa l'ultimo trade avvenuto nel passato
 - Evita look-ahead bias (no future information leakage)
 
-**Nota:** Fase ufficiale del flusso P1→P2→P2b→P3. Integrata in `main.py` e `vps_multiday_runner.py`. Se `trades.csv` non disponibile per un giorno, la fase viene skippata automaticamente con warning e il flusso continua. Sentinel: `_checkpoints/p2b_fusion.done`
+**Ricerca automatica trades:** lo script cerca `trades.txt` o `trades.csv` nella stessa directory del `.depth` file. Se non presente, P2b skippa con warning.
+
+**BUG FIX (Apr 12, 2026):** Sierra Chart CSV export contiene leading spaces nei nomi colonna (`" Time"`, `" Volume"`, ecc.). Fix: `pd.read_csv(skipinitialspace=True)` + `df.columns = [c.lower().strip() for c in df.columns]`. Senza questo fix, il formato non viene riconosciuto.
+
+**Checkpoint:** `_checkpoints/p2b_fusion.done`
 
 ---
 
@@ -218,10 +246,10 @@ Quando `bid_qty_1` scende, non sappiamo se è:
 
 **Script:** `OPTIMIZATIONS/vps_feature_engineering_vectorized.py`
 
-**Input:** `snapshots.csv`
+**Input:** `snapshots.csv` o `snapshots_fused.csv` (se P2b completato)
 **Output:** `features_dom.csv` (~310 MB/giorno)
 
-### Feature Calcolate (~50 colonne)
+### Feature LOB (~50 colonne)
 
 **LOB Spaziale (Ξ):**
 - Densità fisica (tick distance) ai vari livelli
@@ -246,6 +274,24 @@ microprice = (best_bid × ask_qty_1 + best_ask × bid_qty_1) / (bid_qty_1 + ask_
 Prezzo "fair" ponderato per volume — più informativo del mid quando c'è sbilanciamento.
 
 **Altro:** spread_ticks, mid_price_diff, bid/ask_depth_5, depth_ratio
+
+### Nuove Feature TS (Time & Sales) — P2b
+
+Dopo la fusione con T&S, le seguenti feature vengono calcolate:
+
+| Feature | Descrizione |
+|---------|-------------|
+| `delta_L`, `delta_L_1s`, `delta_L_5s` | Δ new passive limit liquidity |
+| `delta_C`, `delta_C_1s`, `delta_C_5s` | Δ cancellations/spoofing (ΔV_total − M) |
+| `delta_M`, `delta_M_1s`, `delta_M_5s` | Δ aggressive market orders from T&S |
+| `stacked_imbalance_bid_3/5` | Institutional aggression bid across 3+ levels (≥300%) |
+| `stacked_imbalance_ask_3/5` | Institutional aggression ask across 3+ levels (≥300%) |
+| `volume_sequence_bid/ask` | Strictly increasing T&S volume across price levels |
+| `bid_fade_3`, `ask_fade_3` | Volume diminishes across top/bottom 3 levels at extreme |
+| `exhaustion_bid`, `exhaustion_ask` | Zero volume at bar high/low (red/green candle) |
+| `unfinished_business_bid/ask` | Non-zero volume at new high/low (auction returns) |
+| `closing_delta_extreme_bid/ask` | Closing delta ≥95% of max/min delta (momentum) |
+| `tick_zscore` | NYSE TICK index Z-score (±2.5 reversal zones) |
 
 **Tecnica:** Fully vectorized pandas/numpy — nessun loop Python row-by-row.
 
@@ -295,7 +341,7 @@ def get(self):
 
 **Checkpoint:** `_checkpoints/p4_agg.done`
 
-`★ Insight: exhaustion_count = eventi dove il book si svuota (qty ≤ soglia). Predice liquidazione/pressione — running counter O(1) invece di O(n) è la differenza tra 390M iterazioni e 390M letture`
+`★ Insight: exhaustion_count = eventi dove il book si svuota (qty ≤ soglia). Predice liquidazione/espressione — running counter O(1) invece di O(n) è la differenza tra 390M iterazioni e 390M letture`
 
 ---
 
@@ -304,17 +350,19 @@ def get(self):
 **Script:** `OPTIMIZATIONS/vps_cusum_sampler.py`
 
 **Input:** `features_dom.csv` + `features_dom_agg.csv`
-**Output:** `sampled_events.csv` (~1% degli eventi originali)
+**Output:** `sampled_events.csv` (~1% degli eventi originali, ~31 MB/giorno)
 
-### Algoritmo CUSUM
+### Algoritmo CUSUM (Adaptive, per-day)
 
 ```
-Pass 1: Calcola h = 25° percentile(|Δmid_price|) non nulli
+Pass 1: Calcola h = 5° percentile(|Δmid_price|) non nulli (floor=0.5 tick)
+Pass 1b: valida emissione su sample 200k righe — se rate > 10%, raddoppia h iterativamente
 Pass 2: Accumula Δmid_price in CUSUM S
          Quando |S| > h → emetti evento → resetta S
 ```
 
 **Risultato:** ~10K-50K eventi campionati da ~5-20M per sessione.
+**Importante:** h viene calcolato per OGNI giorno dalla distribuzione dei prezzi di quel giorno — soglie diverse per day.
 
 **Ottimizzazioni:**
 - `np.percentile()` invece di `sort()` → O(n) vs O(n log n)
@@ -360,24 +408,34 @@ mfe_120s = running_max[idx_120s] - ref_price
 
 **Checkpoint:** `_checkpoints/p6_excursion.done`
 
-`★ Insight: np.maximum.accumulate applica un running maximum in O(n) vettorizzato a livello C — il trick è che il running max alla posizione i è semplicemente il max di tutti i prezzi da start a i`
+`★ Insight: np.maximum.accumulate applica un running maximum in O(n) vettorizzato a livello C — il running max alla posizione i è semplicemente il max di tutti i prezzi da start a i`
 
 ---
 
 ## Fase 7 — Triple-Barrier Labeling
 
-**Script:** `OPTIMIZATIONS/vps_phase7_labeling.py`
+**Script:** `P7/vps_phase7_labeling.py`
 
 **Input:** `excursion_stats.csv` + `snapshots.csv`
 **Output:** `phase7_labels_*/` (directory per candidato)
 
-### 3 Candidati Triple-Barrier (Tick Clock)
+### 3 Candidati Triple-Barrier (Tick Clock) — Aggiornati Apr 2026
 
-| Candidato | Vertical Barrier | Profit Target | Stop Loss |
-|-----------|-----------------|---------------|-----------|
-| C1        | 30 ticks        | 9.5 ticks    | 9.8 ticks |
-| C2        | 60 ticks        | 20.0 ticks   | 20.0 ticks|
-| C3        | 120 ticks       | 13.0 ticks   | 14.5 ticks|
+| Candidato | Vertical Barrier | Profit Target | Stop Loss | Note |
+|-----------|-----------------|---------------|-----------|------|
+| C1 | **2000 ticks** | **10.0 ticks** | **10.0 ticks** | Scalping corto — 88.5% barrier hit |
+| C2 | **4000 ticks** | **20.0 ticks** | **20.0 ticks** | Scalping medio — 64.7% barrier hit |
+| C3 | **8000 ticks** | **40.0 ticks** | **40.0 ticks** | Intraday swing — 36.5% barrier hit |
+
+**Risultati su dati Mar 13, 2026:**
+
+| Candidato | Barrier hit | Balance ratio | Win rate |
+|-----------|-------------|---------------|----------|
+| 2000t/10/10 | 88.5% | 0.974 | 49.3% |
+| 4000t/20/20 | 64.7% | 0.944 | 48.6% |
+| 8000t/40/40 | 36.5% | 0.865 | 46.4% |
+
+**Unità vertical barrier: TICK CLOCK** (book update count, NOT wall-clock seconds)
 
 ### Labeling Rules
 
@@ -395,53 +453,31 @@ mfe_120s = running_max[idx_120s] - ref_price
 ```
 Prezzo parte da 100
   tick 5:  raggiunge PT (100 + 9.5×0.25) → +1 label
-  tick 8:  attraversa SL (99.75) → ignorato (gia label +1)
+  tick 8:  attraversa SL (99.75) → ignorato (già label +1)
 ```
 
-Solo il **primo** tocco determina la label.
+Solo il **primo tocco** determina la label.
 
 ### Engine
 
 - **Numba JIT** parallelizzato su 8 core
 - **Tick Clock** invece di tempo fisico (book update count)
 - Scan parallelo su 500 eventi per batch
+- Memory-safe micro-chunking (500K rows per batch)
+- Float64→float32 downcasting
 
 **Checkpoint:** `_checkpoints/p7_c1.done`, `p7_c2.done`, `p7_c3.done`
 
 `★ Insight: Triple Barrier Method (López de Prado) trasforma labeling finanziario da problema aperto a classificazione supervised. First-touch è il cuore: solo il primo tocco conta, non il massimo toccato`
 
 ---
-
-## Fase 7b — Filtro Macro (GEX / Beta-Surprise)
-
-**Script:** `OPTIMIZATIONS/vps_phase7b_macro_filter.py`
-
-**Input:** `sampled_events.csv` + macro data (GEX, VIX, Beta)
-**Output:**
-- `sampled_events_gex_pos.csv` → Mean Reversion regime
-- `sampled_events_gex_neg.csv` → Momentum regime
-
-### Cosa Filtra
-
-**GEX Zero Crossing:** Transizioni vicino a GEX=0 — "zone infette" dove le dinamiche LOB si rompono.
-
-**Beta Shock:** Variazioni estreme del beta (market sensitivity) — shocks esogeni.
-
-### Perché Due Modelli
-
-Regimi diversi → distribuzione ritorni diversa → pattern diversi → due modelli specializzati battono uno generico.
-
-**Thresholds:**
-- `GEX_EPSILON = 50M` — entro ±50M = territorio Zero
-- `BETA_SHOCK_THRESH = 3.5` — z-score moltiplicativo
-
-**Nota:** Usa mock data se CSV esterni non disponibili.
+**Nota:** P7b (Filtro Macro GEX/Beta) è stato deprecato e rimosso.
 
 ---
 
 ## Fase 8 — ML Entry Model
 
-**Script:** `OPTIMIZATIONS/vps_phase8_entry_model.py`
+**Script:** `P8/vps_phase8_entry_model.py`
 
 **Input:** `sampled_events.csv` + `phase7_labels_*/`
 **Output:**
@@ -449,31 +485,53 @@ Regimi diversi → distribuzione ritorni diversa → pattern diversi → due mod
 - `phase8_trainval_results.csv` — metriche train/val/test
 - `phase8_feature_importance.csv`
 - `phase8_best_candidate.md`
+- `phase8_oof_predictions.csv`
 
-### Features (~50)
+### Features (~70)
 
-Tutte da P3 + P4: imbalance, stack/pull, microprice, exhaustion, spread, rolling stats.
+Tutte da P3 + P4 + **P2b TS features**:
+- LOB: imbalance, stack/pull, microprice, spread, depth
+- Rolling: rolling stats (1s, 5s, 30s windows)
+- **TS (Time & Sales):** delta_L/C/M, stacked imbalances, volume sequencing, bid/ask fade, exhaustion, unfinished business, closing delta extremes, tick_zscore
 
-### Train/Val/Test Split (temporale)
+### Train/Val/Test Split
 
+**Multi-day Walk-Forward** (≥2 giorni):
+- Train: primo 70% dei giorni
+- Val: successivo 15%
+- Test: ultimo 15%
+
+**Fallback Intra-Day** (1 giorno solo):
 ```
-Train: 00:00 — 06:00
-Val:   06:00 — 08:00
-Test:  08:00 — 09:30
+Train: 13:40:00 — 18:00:00 UTC  (09:40–14:00 ET)
+Val:   18:00:00 — 18:55:00 UTC  (14:00–14:55 ET)
+Test:  18:55:00 — 19:50:00 UTC  (14:55–15:50 ET)
 ```
 
-**Metriche target:** `P_T` — Probabilità di Transazione Corretta (non accuracy standard).
+### Metrica Target
+
+**P_T — Probabilità di Transazione Corretta** (non accuracy standard):
+```
+P_T = (PT + TT - CT) / CT
+```
+- PT = Potential Transactions (class occurrence in labels)
+- TT = Predicted Transactions (class occurrence in predictions)
+- CT = Correct Transactions (intersection)
+- Obiettivo: P_T < 1.0 out-of-sample (maggiore è CT a parità di PT+TT, migliore)
+
+**PT_THRESHOLD_DEEPLOB = 0.53** — soglia OOS per escalation a CNN+LSTM (UCL DeepLOB)
 
 ### Modelli Testati (best available)
 
-1. LightGBM
+1. LightGBM (preferito)
 2. XGBoost
 3. Random Forest
 4. Logistic Regression (fallback)
+5. HistGradientBoosting
 
 **Checkpoint:** `_checkpoints/p8_ml.done`
 
-`★ Insight: P_T cattura la vera utilità del modello per trading — accuracy 90% con stop sempre colpito = perdita. 52% direzione giusta con buona expectancy = profitto`
+`★ Insight: P_T cattura la vera utilità del modello per trading — accuracy 90% con stop sempre colpito = perdita. 52% direzione giusta con buona expectancy = profitto. Soglia 53% OOS validata da UCL DeepLOB come prerequisite per deep nets.`
 
 ---
 
@@ -508,8 +566,6 @@ log P(a) = log N(z|μ, σ) − Σlog(aₖ)  # change of variables
 ```
 
 **Queue Simulation:** Mock FIFO engine — simula posizione in coda, penalità cancellazione.
-
-**Dependencies:** `torch`, `numpy`
 
 ---
 
@@ -560,9 +616,33 @@ Chiama direttamente `sc.BuyEntry`, `sc.SellEntry`, `sc.Flatten` — **nessuno sp
 P1 → P2 → P2b → P3 → P4 → P5 → P6 → P7 (×3 candidati) → P8
 ```
 
+### run_p1_to_p7_multiday.py (NUOVO — Apr 2026)
+
+Orchestrator dedicato per P1→P7 (con P2b incluso). Cerca automaticamente `trades.txt/csv` accanto al `.depth` file per ogni giorno. Se trades assente per un giorno, P2b skippa con warning e il pipeline continua.
+
+```bash
+# Dry run
+python3 run_p1_to_p7_multiday.py --dry-run
+
+# Resume (skip giorni con P7 già completo)
+python3 run_p1_to_p7_multiday.py --resume --workers 1
+
+# Forza re-run completo
+python3 run_p1_to_p7_multiday.py --force --max-days 3
+
+# Sequential (RAM-safe)
+python3 run_p1_to_p7_multiday.py --resume --workers 1
+```
+
+**Target single day:** NON esiste `--days` nel multiday runner. Per targettare un giorno specifico usare direttamente:
+```bash
+python3 P1/main.py --days 2026-03-13 --force
+```
+Questo lancia P1→P6 inline per quel giorno (P2b viene chiamato automaticamente da P1/main.py).
+
 ### vps_multiday_runner.py
 
-Coordina P1-P8 su tutti i giorni (4-6 worker paralleli).
+Coordina P1-P8 su tutti i giorni (full pipeline).
 
 ```bash
 # Full run
@@ -577,7 +657,7 @@ python3 vps_multiday_runner.py --workers 4 --resume
 
 ### incremental_p7p8_runner.py
 
-Esegue P7+P8 per giorni con P1-P6 completo ma P7/P8 mancante. Checkpoint sentinel per idempotenza.
+Esegue P7+P8 per giorni con P1-P6 completo ma P7/P8 mancante.
 
 ```bash
 python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --workers 4
@@ -600,6 +680,7 @@ Ogni fase produce un sentinel file in `_checkpoints/`:
 output/{date}/_checkpoints/
   p1_parse.done
   p2_reconstruct.done
+  p2b_fusion.done        ← NUOVO (Apr 2026)
   p3_features.done
   p4_agg.done
   p5_sample.done
@@ -611,11 +692,11 @@ output/{date}/_checkpoints/
 **Formato sentinel:**
 ```
 status=done
-time=2026-04-04T18:30:00
+time=2026-04-10T18:30:00
 error=   # opzionale, se failed
 ```
 
-**Manifest:** `/opt/depth-dom/output/_multiday_manifest.csv` — tracking centralizzato per resume.
+**Manifest:** `/opt/depth-dom/output/_multiday_manifest.csv` e `_p1p7_manifest.csv`
 
 ---
 
@@ -624,59 +705,101 @@ error=   # opzionale, se failed
 ```
 /opt/depth-dom/
 ├── vps_depth_parser.py              # P1
-├── book_reconstructor.py            # P2
+├── book_reconstructor.py              # P2
+├── vps_phase2b_data_fusion.py       # P2b
 ├── vps_feature_engineering_vectorized.py  # P3
-├── vps_feature_engineering_agg.py   # P4
-├── vps_cusum_sampler.py             # P5
+├── vps_feature_engineering_agg.py    # P4
+├── vps_cusum_sampler.py              # P5
 ├── vps_excursion_analysis_vectorized.py  # P6
-├── vps_phase7_labeling.py           # P7
-├── vps_phase7b_macro_filter.py      # P7b
-├── vps_phase8_entry_model.py        # P8
-├── vps_phase11_rl_execution.py      # P11
-├── vps_phase12_sierra_bridge.py      # P12
-├── vps_multiday_runner.py           # Orchestrator batch
-├── incremental_p7p8_runner.py       # Orchestrator incremental
-├── _pipeline_constants.py           # Costanti condivise
-├── main.py                          # CLI single-day
-├── input/NQ*/YYYY-MM-DD.depth       # Source data
+├── vps_phase7_labeling.py            # P7
+├── vps_phase8_entry_model.py         # P8
+├── vps_phase11_rl_execution.py        # P11
+├── vps_phase12_sierra_bridge.py       # P12
+├── vps_multiday_runner.py             # Orchestrator batch
+├── incremental_p7p8_runner.py         # Orchestrator incremental
+├── run_p1_to_p7_multiday.py          # Orchestrator P1-P7 (nuovo)
+├── _pipeline_constants.py              # Costanti condivise
+├── main.py                            # CLI single-day
+├── input/NQ*/YYYY-MM-DD.depth         # Source data
 └── output/
     ├── _multiday_manifest.csv
-    ├── _p7p8_incremental_manifest.csv
+    ├── _p1p7_manifest.csv              ← NUOVO
     └── {YYYY-MM-DD}/
-        ├── events.csv               # P1
-        ├── snapshots.csv            # P2
-        ├── features_dom.csv         # P3
-        ├── features_dom_agg.csv     # P4
-        ├── sampled_events.csv       # P5
-        ├── excursion_stats.csv      # P6
-        ├── phase7_labels_*/         # P7 (3 directory candidati)
-        ├── _checkpoints/            # Sentinel files
-        └── model.pkl                # P8
+        ├── events.csv                  # P1
+        ├── snapshots.csv               # P2
+        ├── snapshots_fused.csv         # P2b (se T&S disponibile)
+        ├── features_dom.csv            # P3
+        ├── features_dom_agg.csv       # P4
+        ├── sampled_events.csv          # P5
+        ├── excursion_stats.csv         # P6
+        ├── phase7_labels_*/          # P7 (3 directory candidati)
+        │   ├── phase7_labels_2000ticks_10p0_10p0/
+        │   ├── phase7_labels_4000ticks_20p0_20p0/
+        │   └── phase7_labels_8000ticks_40p0_40p0/
+        ├── _checkpoints/              # Sentinel files
+        └── model.pkl                  # P8
 ```
+
+---
+
+## SHARED/_pipeline_constants.py — Costanti Aggiornate Apr 2026
+
+```python
+# 3 Candidati Triple-Barrier
+CANDIDATES = [
+    {"vb_ticks": 2000, "pt_ticks": 10.0, "sl_ticks": 10.0, "desc": "2000t/10/10"},
+    {"vb_ticks": 4000, "pt_ticks": 20.0, "sl_ticks": 20.0, "desc": "4000t/20/20"},
+    {"vb_ticks": 8000, "pt_ticks": 40.0, "sl_ticks": 40.0, "desc": "8000t/40/40"},
+]
+
+# Trading Hours (EDT = UTC-4, marzo-novembre)
+TRADING_START_ET = "09:40"
+TRADING_END_ET = "15:50"
+TRADING_START_UTC = "13:40"
+TRADING_END_UTC = "19:50"
+
+# Execution Cadence
+EXEC_INTERVAL_MIN = 5
+EXEC_START_ET = "09:45"
+EXEC_END_ET = "15:30"
+EXIT_START_ET = "15:55"
+EXIT_END_ET = "16:00"
+
+# DeepLOB Architecture
+NEUTRAL_BAND_BPS = 0.0002   # ±2 bps
+PT_THRESHOLD_DEEPLOB = 0.53  # 53% OOS per deep nets
+COST_BP_NQ = 8               # ~$40 round-turn NQ
+COST_BP_ES = 2               # ~$10 round-turn ES
+```
+
+**ALL_FEATURE_PATTERNS:** ~70 feature columns da P3 + P4 + **P2b TS features** (delta_L/C/M, stacked_imbalance, volume_sequence, bid_fade, exhaustion, unfinished_business, closing_delta_extreme, tick_zscore)
 
 ---
 
 ## Bug Noti (Stato)
 
-| Bug | File | Stato | Prompt |
-|-----|------|-------|--------|
-| P3 depth_ratio = inf | vps_feature_engineering_vectorized.py | ✅ FIXED | — |
-| P2 crossed book non rejected | vps_book_reconstructor.py | ✅ FIXED | — |
-| P4 exhaustion_count O(n) | vps_feature_engineering_agg.py | ✅ FIXED | — |
-| P7 binary search start_idx | vps_p7_global_runner.py | ✅ FIXED | — |
-| P8 warm-start fake | vps_phase8_entry_model.py | ✅ FIXED (rinominato batch_retrain) | — |
-| P4 ts format ms vs ISO | vps_feature_engineering_agg.py | ⚠️ Known (contract, non blocking) | — |
-| P5 memory bulk load | vps_cusum_sampler.py | ⚠️ Known (alignment guard added) | — |
-| P7 vertical barrier time-based | vps_phase7_labeling.py | ✅ FIXED (tick-based) | 1–8 |
-| P2b offline/standalone | vps_phase2b_data_fusion.py | ✅ FIXED (integrato) | 1–8 |
-| P8 old key names + local helpers | vps_phase8_entry_model.py | ✅ FIXED | 1–8 |
+| Bug | File | Stato |
+|-----|------|-------|
+| P3 depth_ratio = inf | vps_feature_engineering_vectorized.py | ✅ FIXED |
+| P2 crossed book non rejected | vps_book_reconstructor.py | ✅ FIXED |
+| P4 exhaustion_count O(n) | vps_feature_engineering_agg.py | ✅ FIXED |
+| P7 binary search start_idx | vps_p7_global_runner.py | ✅ FIXED |
+| P8 warm-start fake | vps_phase8_entry_model.py | ✅ FIXED (batch_retrain) |
+| P7 vertical barrier time-based | vps_phase7_labeling.py | ✅ FIXED (tick-based) |
+| P2b offline/standalone | vps_phase2b_data_fusion.py | ✅ FIXED (integrato) |
+| P8 old key names + local helpers | vps_phase8_entry_model.py | ✅ FIXED |
+| P7 barrier params too tight (99%+ vertical expiry) | vps_phase7_labeling.py | ✅ FIXED (→ 2000/4000/8000 ticks) |
+| P7/P8 Unicode arrows in output | vps_phase7_labeling.py | ✅ FIXED (ASCII per Windows) |
+| P4 streaming CSV O(n²) | vps_feature_engineering_agg.py | ✅ FIXED |
+| P5 CUSUM over-emission (96% rate) | vps_cusum_sampler.py | ✅ FIXED (adaptive calibration, 10% cap) |
+| P2b Sierra CSV leading spaces in column names | vps_phase2b_data_fusion.py | ✅ FIXED (skipinitialspace + strip) |
 
 ---
 
 ## Riferimenti
 
+- NotebookLM: "Deep Limit Order Book Forecasting and Market Microstructure Analysis" (ID: 077fed0a, 288 sources)
 - Pipeline completo: `DEPTH-DOM-PIPELINE-DOCUMENTATION.md`
-- Architettura HFT: `HFT_ARCHITECTURE_DOC.md`
 - VPS access: `root@185.185.82.205` (primary), `root@96.30.209.74` (secondary)
 - Log pipeline: `/opt/depth-dom/pipeline_full3.log`
 - Log cron: `/opt/depth-dom/logs/cron_orchestrator.log`

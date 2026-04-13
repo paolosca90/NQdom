@@ -250,10 +250,6 @@ def _safe_float(s: str) -> float:
         return 0.0
 
 
-# ---------------------------------------------------------------------------
-# Main aggregation
-# ---------------------------------------------------------------------------
-
 def aggregate_features_chunked(
     input_path: Path,
     output_path: Path,
@@ -265,99 +261,111 @@ def aggregate_features_chunked(
         "last_ts": None,
     }
 
-    w1s = Window1s()
-    imb_5s = SlidingWindowStats(WINDOW_5S_MS)
-    net_w_5s = SlidingWindowStats(WINDOW_5S_MS)
-    delta_5s = SlidingWindowStats(WINDOW_5S_MS)
-    imb_30s = SlidingWindowStats(WINDOW_30S_MS)
-    net_w_30s = SlidingWindowStats(WINDOW_30S_MS)
-    delta_30s = SlidingWindowStats(WINDOW_30S_MS)
+    print("  [P4] Streaming with pandas vectorized rolling (chunked)...")
+    
+    needed_cols = [
+        'ts', 'imbalance_1', 'ps_net_weighted', 'ps_delta_L1',
+        'pull_bid_1', 'stack_bid_1', 'pull_ask_1', 'stack_ask_1',
+        'bid_qty_1', 'ask_qty_1'
+    ]
+    
+    first_chunk = True
+    last_overlap = pd.DataFrame()
+    chunksize = 250_000
+    rows_proc = 0
+    import gc
+    from collections import deque
+    
+    output_cols = AGG_FEATURE_FIELDS.copy()
 
-    # OPTIMIZATION 1 & 2: pandas usecols + itertuples (no dict, no try/except)
-    # Read ONLY 10 needed columns instead of all 36
-    print("  [P4] Reading with usecols + itertuples (10 cols instead of 36)...")
-    df = pd.read_csv(input_path, usecols=NEEDED_COLS, engine='c', low_memory=False)
-    print(f"  [P4] Loaded {len(df):,} rows, {len(df.columns)} columns")
+    with pd.read_csv(input_path, usecols=needed_cols, chunksize=chunksize, iterator=True) as reader:
+        for chunk in reader:
+            # Parse datetime correctly for timezone-naive timestamps
+            chunk['ts'] = chunk['ts'].astype(str).str.slice(0, 26)
+            chunk['ts_dt'] = pd.to_datetime(chunk['ts'], format='%Y-%m-%d %H:%M:%S.%f', errors='coerce')
+            # Drop rows where timestamp parsing failed (NaT) — rolling() can't handle NaT in index
+            chunk = chunk.dropna(subset=['ts_dt'])
+            chunk.set_index('ts_dt', inplace=True)
+            
+            # Track ts for report
+            if first_chunk:
+                stats['first_ts'] = chunk['ts'].iloc[0]
+            stats['last_ts'] = chunk['ts'].iloc[-1]
+            
+            chunk.drop(columns=['ts'], inplace=True) # remove raw string column
 
-    with open(output_path, "w", newline="", encoding="utf-8") as f_out:
-        writer = csv.DictWriter(f_out, fieldnames=AGG_FEATURE_FIELDS)
-        writer.writeheader()
+            if not last_overlap.empty:
+                df = pd.concat([last_overlap, chunk], verify_integrity=False, sort=False)
+            else:
+                df = chunk
 
-        # OPTIMIZATION 3: itertuples for fast row iteration (namedtuple, no dict)
-        for row in df.itertuples(index=False):
-            ts_str = row.ts
-            # Fast timestamp: extract digits once
-            digits = ''.join(c for c in ts_str if c.isdigit())
-            ts_ms = _parse_ms_fast(digits)
+            # Guard: if index has duplicates after concat, sort to prevent
+            # "index values must be monotonic" in rolling operations
+            if df.index.has_duplicates:
+                df = df.sort_index()
 
-            # Direct attribute access via itertuples (no dict lookup, no try/except)
-            imbalance = _safe_float(row.imbalance_1)
-            net_w = _safe_float(row.ps_net_weighted)
-            delta = _safe_float(row.ps_delta_L1)
-            pull_bid = _safe_float(row.pull_bid_1)
-            stack_bid = _safe_float(row.stack_bid_1)
-            pull_ask = _safe_float(row.pull_ask_1)
-            stack_ask = _safe_float(row.stack_ask_1)
-            bid_qty = _safe_float(row.bid_qty_1)
-            ask_qty = _safe_float(row.ask_qty_1)
+            # Compute queue exhaustion
+            is_exhaustion = ((df['bid_qty_1'] <= EXHAUSTION_THRESHOLD) | (df['ask_qty_1'] <= EXHAUSTION_THRESHOLD)).astype(int)
 
-            # Update windows
-            w1s.update(ts_ms, imbalance, net_w, delta,
-                        pull_bid, stack_bid, pull_ask, stack_ask,
-                        bid_qty, ask_qty)
-            imb_5s.update(ts_ms, imbalance)
-            net_w_5s.update(ts_ms, net_w)
-            delta_5s.update(ts_ms, delta)
-            imb_30s.update(ts_ms, imbalance)
-            net_w_30s.update(ts_ms, net_w)
-            delta_30s.update(ts_ms, delta)
+            r1s = df.rolling('1s')
+            r5s = df.rolling('5s')
+            r30s = df.rolling('30s')
+            
+            df_out = pd.DataFrame(index=df.index)
+            # Need ms from midnight based on the target specification
+            df_out['ts'] = df.index.hour * 3600_000 + df.index.minute * 60_000 + df.index.second * 1_000 + df.index.microsecond // 1_000
+            
+            df_out['imbalance_mean_1s'] = r1s['imbalance_1'].mean().fillna(0.0).round(6)
+            df_out['imbalance_std_1s'] = r1s['imbalance_1'].std().fillna(0.0).round(6)
+            df_out['imbalance_mean_5s'] = r5s['imbalance_1'].mean().fillna(0.0).round(6)
+            df_out['imbalance_std_5s'] = r5s['imbalance_1'].std().fillna(0.0).round(6)
+            df_out['imbalance_mean_30s'] = r30s['imbalance_1'].mean().fillna(0.0).round(6)
+            df_out['imbalance_std_30s'] = r30s['imbalance_1'].std().fillna(0.0).round(6)
+            
+            df_out['ps_net_weighted_mean_1s'] = r1s['ps_net_weighted'].mean().fillna(0.0).round(6)
+            df_out['ps_net_weighted_mean_5s'] = r5s['ps_net_weighted'].mean().fillna(0.0).round(6)
+            df_out['ps_net_weighted_mean_30s'] = r30s['ps_net_weighted'].mean().fillna(0.0).round(6)
+            
+            df_out['pull_bid_1_sum_1s'] = r1s['pull_bid_1'].sum().fillna(0.0).round(2)
+            df_out['stack_bid_1_sum_1s'] = r1s['stack_bid_1'].sum().fillna(0.0).round(2)
+            df_out['pull_ask_1_sum_1s'] = r1s['pull_ask_1'].sum().fillna(0.0).round(2)
+            df_out['stack_ask_1_sum_1s'] = r1s['stack_ask_1'].sum().fillna(0.0).round(2)
+            
+            df_out['ps_delta_L1_mean_1s'] = r1s['ps_delta_L1'].mean().fillna(0.0).round(6)
+            df_out['ps_delta_L1_mean_5s'] = r5s['ps_delta_L1'].mean().fillna(0.0).round(6)
+            df_out['ps_delta_L1_mean_30s'] = r30s['ps_delta_L1'].mean().fillna(0.0).round(6)
+            
+            df_out['update_rate_1s'] = r1s['imbalance_1'].count().fillna(0).astype(int)
+            
+            df_out['queue_exhaustion_1s'] = is_exhaustion.rolling('1s').sum().fillna(0).astype(int)
+            
+            # Slice off the overlap part for writing
+            overlap_len = len(last_overlap)
+            write_df = df_out.iloc[overlap_len:]
+            
+            # Save the last 30s of the chunk for the next iteration step
+            last_ts = df.index[-1]
+            cutoff_time = last_ts - pd.Timedelta(seconds=30)
+            last_overlap = df.loc[df.index > cutoff_time]
+            
+            # Ensure columns match exact order of AGG_FEATURE_FIELDS
+            write_df = write_df[output_cols]
+            
+            mode = 'w' if first_chunk else 'a'
+            write_df.to_csv(output_path, mode=mode, header=first_chunk, index=False)
+            first_chunk = False
+            
+            rows_proc += len(write_df)
+            print(f"  Phase 4: {rows_proc:,} rows | Vectorized chunks processed.")
+            
+            # Clear memory
+            del chunk, df, df_out, write_df, is_exhaustion, r1s, r5s, r30s
+            gc.collect()
 
-            imb_1_mean, imb_1_std, net_w_1_mean, delta_1_mean, \
-                pull_bid_sum, stack_bid_sum, pull_ask_sum, stack_ask_sum, \
-                update_rate, exhaustion = w1s.get()
-
-            imb_5_mean, imb_5_std = imb_5s.get()
-            net_w_5_mean, _ = net_w_5s.get()
-            delta_5_mean, _ = delta_5s.get()
-
-            imb_30_mean, imb_30_std = imb_30s.get()
-            net_w_30_mean, _ = net_w_30s.get()
-            delta_30_mean, _ = delta_30s.get()
-
-            writer.writerow({
-                "ts": ts_ms,
-                "imbalance_mean_1s": round(imb_1_mean, 6),
-                "imbalance_std_1s": round(imb_1_std, 6),
-                "imbalance_mean_5s": round(imb_5_mean, 6),
-                "imbalance_std_5s": round(imb_5_std, 6),
-                "imbalance_mean_30s": round(imb_30_mean, 6),
-                "imbalance_std_30s": round(imb_30_std, 6),
-                "ps_net_weighted_mean_1s": round(net_w_1_mean, 6),
-                "ps_net_weighted_mean_5s": round(net_w_5_mean, 6),
-                "ps_net_weighted_mean_30s": round(net_w_30_mean, 6),
-                "pull_bid_1_sum_1s": round(pull_bid_sum, 2),
-                "stack_bid_1_sum_1s": round(stack_bid_sum, 2),
-                "pull_ask_1_sum_1s": round(pull_ask_sum, 2),
-                "stack_ask_1_sum_1s": round(stack_ask_sum, 2),
-                "ps_delta_L1_mean_1s": round(delta_1_mean, 6),
-                "ps_delta_L1_mean_5s": round(delta_5_mean, 6),
-                "ps_delta_L1_mean_30s": round(delta_30_mean, 6),
-                "update_rate_1s": update_rate,
-                "queue_exhaustion_1s": exhaustion,
-            })
-
-            stats["rows_written"] += 1
-            stats["rows_processed"] += 1
-            if stats["first_ts"] is None:
-                stats["first_ts"] = ts_str
-            stats["last_ts"] = ts_str
-
-            if stats["rows_processed"] % PROGRESS_EVERY == 0:
-                print(f"  Phase 4: {stats['rows_processed']:,} rows | "
-                      f"1s={len(w1s.ts)} 5s={imb_5s.count} 30s={imb_30s.count}")
-
-    del df
+    stats["rows_processed"] = rows_proc
+    stats["rows_written"] = rows_proc
     return stats
+
 
 
 def print_report(stats: dict[str, Any]) -> None:

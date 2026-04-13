@@ -1,3 +1,21 @@
+<claude-mem-context>
+# Recent Activity
+
+### Apr 10, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #3649 | 3:53 PM | 🔴 | ASCII fix for Windows console compatibility | ~242 |
+| #3644 | 3:48 PM | 🟣 | Phase 7 Labeling Re-Launched After Unicode Fix | ~135 |
+| #3643 | " | 🔴 | P7 Script All Unicode Arrows Now Replaced | ~168 |
+| #3642 | " | 🔴 | P7 Metrics Print Unicode Fixed | ~95 |
+| #3641 | " | 🔴 | P7 Runtime Print Unicode Fix Applied | ~107 |
+| #3640 | 3:47 PM | 🔴 | More Unicode Arrows Found in P7 Runtime Print Statements | ~173 |
+| #3639 | " | 🔄 | P7 Script Docstring Usage Example Fixed | ~115 |
+| #3638 | " | 🔴 | P7 Script Unicode Arrows Replaced with ASCII | ~189 |
+| #3630 | 3:40 PM | 🔵 | P7 Grid File Location Discovered - Uses _candidates_3.csv | ~234 |
+</claude-mem-context>
+
 # P7 — Triple-Barrier Labeling
 
 **Script:** `vps_phase7_labeling.py`
@@ -14,8 +32,8 @@ vb_ticks = vertical barrier in TICK-CLOCK updates (book update count, NOT second
 | C2 | 4000 ticks | 20.0 tick | 20.0 tick | 64.7% barrier hit, bal=0.944 |
 | C3 | 8000 ticks | 40.0 tick | 40.0 tick | 36.5% barrier hit, bal=0.865 |
 
-**NOTA:** I vecchi parametri (30/60/120 VB) davano 99.5-100% vertical expiry — insufficiente.
-Su NQ (ATR ~264 punti/giorno) servono VB più lunghi per catturare movimento direzionale.
+**NOTA:** I vecchi parametri (30/60/120 VB con PT/SL 9.5/20/13) sono stati scartati perché
+il 99.5-100% degli eventi scadeva verticalmente. Su NQ (ATR ~264 punti/giorno) servono VB più lunghi.
 
 ## Labeling Rules
 
@@ -31,18 +49,6 @@ cronologica e dice quale barriera viene toccata **per prima**.
 
 ## Engine
 Numba JIT parallelizzato su 8 core.
-
-## UTC Trading Window
-**Sessione analizzata:** 13:40:00 — 19:50:00 UTC (09:40–15:50 ET, EDT=UTC-4)
-Filtro applicato in P1 — tutti i file successivi ereditano la finestra.
-
-**SPLIT temporali (Multi-Day Walk-Forward ≥2 giorni):**
-```
-Train: 13:40:00 — 18:00:00  (09:40–14:00 ET, ~70%)
-Val:   18:00:00 — 18:55:00  (14:00–14:55 ET, ~15%)
-Test:  18:55:00 — 19:50:00  (14:55–15:50 ET, ~15%)
-```
-**Fallback Intra-Day** (se <2 giorni): split orario equivalenti.
 
 ## Input / Output
 - **Input:** `excursion_stats.csv` + `snapshots.csv` + `sampled_events.csv`

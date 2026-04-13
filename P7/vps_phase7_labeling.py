@@ -19,22 +19,22 @@ Key methodological difference from Phase 6:
   both PT and SL multiple times — only the FIRST crossing determines the label.
 
 Labeling rules:
-  +1  → PT (profit target) is the first barrier touched
-  -1  → SL (stop loss)     is the first barrier touched
-   0  → vertical barrier (tick clock) expires before either PT or SL is touched
+  +1  -> PT (profit target) is the first barrier touched
+  -1  -> SL (stop loss)     is the first barrier touched
+   0  -> vertical barrier (tick clock) expires before either PT or SL is touched
 
 Data sources:
-  - sampled_events.csv     → event timestamps (ts)
-  - excursion_stats.csv    → mid_price_at_t for each event (same row order)
-  - snapshots.csv          → chronological mid-price path for first-touch scan
+  - sampled_events.csv     -> event timestamps (ts)
+  - excursion_stats.csv    -> mid_price_at_t for each event (same row order)
+  - snapshots.csv          -> chronological mid-price path for first-touch scan
 
 Usage:
-  python3 phase7_labeling.py \\
-      --snapshots  /opt/depth-dom/output/2026-01-08/snapshots.csv \\
-      --sampled    /opt/depth-dom/output/2026-01-08/sampled_events.csv \\
-      --refprice   /opt/depth-dom/output/2026-01-08/excursion_stats.csv \\
-      --grid       /opt/depth-dom/output/_candidates_3.csv \\
-      --output     /opt/depth-dom/output/2026-01-08/ \\
+  python3 phase7_labeling.py \
+      --snapshots  /opt/depth-dom/output/2026-01-08/snapshots.csv \
+      --sampled    /opt/depth-dom/output/2026-01-08/sampled_events.csv \
+      --refprice   /opt/depth-dom/output/2026-01-08/excursion_stats.csv \
+      --grid       /opt/depth-dom/output/_candidates_3.csv \
+      --output     /opt/depth-dom/output/2026-01-08/
       --candidates 10
 """
 
@@ -45,7 +45,7 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
-# ── import the single authorized source for label filename construction ─────────
+# -- import the single authorized source for label filename construction ---------
 sys.path.insert(0, str(Path(__file__).parent.parent / "SHARED"))
 from _pipeline_constants import label_filename
 
@@ -53,7 +53,7 @@ TICK_SIZE = 0.25
 PROGRESS_EVERY = 10_000
 
 
-# ── snapshot index (numpy) ────────────────────────────────────────────────────
+# -- snapshot index (numpy) ----------------------------------------------------
 
 def build_snapshot_index(snapshots_path: Path):
     """
@@ -73,7 +73,7 @@ def build_snapshot_index(snapshots_path: Path):
     return ts_ns[order], mid_p[order]
 
 
-# ── load event reference prices ──────────────────────────────────────────────
+# -- load event reference prices ----------------------------------------------
 
 def load_event_ref_prices(refprice_path: Path):
     """
@@ -85,7 +85,7 @@ def load_event_ref_prices(refprice_path: Path):
     return df.set_index("ts")["mid_price_at_t"]
 
 
-# ── numpy-accelerated first-touch scan (TICK CLOCK / PARALLEL) ───────────────
+# -- numpy-accelerated first-touch scan (TICK CLOCK / PARALLEL) ---------------
 
 @njit(parallel=True, cache=True)
 def _numba_first_touch_scan_tick(snap_ts: np.ndarray, snap_mid: np.ndarray,
@@ -175,7 +175,7 @@ def _scan_first_touch_numpy_tickclock(
 
 
 
-# ── per-candidate labeling ────────────────────────────────────────────────────
+# -- per-candidate labeling ----------------------------------------------------
 
 def label_candidate(
     snap_ts: np.ndarray, snap_mid: np.ndarray,
@@ -257,7 +257,7 @@ def label_candidate(
     }
 
 
-# ── temporal split (no random shuffle) ──────────────────────────────────────
+# -- temporal split (no random shuffle) --------------------------------------
 
 SPLITS = {
     "train": ("00:00:00.000000", "06:00:00.000000"),
@@ -270,7 +270,7 @@ def ts_in_split(ts_str: str, lo: str, hi: str) -> bool:
     return lo <= time_part < hi
 
 
-# ── leaderboard ───────────────────────────────────────────────────────────────
+# -- leaderboard ---------------------------------------------------------------
 
 LEADERBOARD_FIELDS = [
     "vertical_barrier_ticks","pt_ticks","sl_ticks","pt_sl_ratio",
@@ -280,7 +280,7 @@ LEADERBOARD_FIELDS = [
 ]
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# -- main ----------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="Phase 7: First-Touch Triple Barrier Labeling")
@@ -313,18 +313,18 @@ def main():
     print(f"  Candidates : {args.candidates}")
     print(f"  Split      : {args.split}")
 
-    # ── 1. Snapshot index ──────────────────────────────────────────────
+    # -- 1. Snapshot index ----------------------------------------------
     print(f"\n[1] Loading snapshot index …")
     snap_ts, snap_mid = build_snapshot_index(args.snapshots)
     t_range = (snap_ts[-1] - snap_ts[0]) / 1e9
     print(f"    {len(snap_ts):,} snapshots  ({t_range:.0f}s = {t_range/60:.1f}min span)")
 
-    # ── 2. Reference prices (mid_price_at_t per event) ──────────────────
+    # -- 2. Reference prices (mid_price_at_t per event) ------------------
     print(f"\n[2] Loading reference prices from {args.refprice.name} …")
     ref_prices = load_event_ref_prices(args.refprice)
     print(f"    {len(ref_prices):,} events with ref price")
 
-    # ── 3. Sampled events (with optional temporal split) ─────────────────
+    # -- 3. Sampled events (with optional temporal split) -----------------
     print(f"\n[3] Loading sampled events ({args.split}) …")
     df_sampled = pd.read_csv(args.sampled, engine="c", dtype={"ts": str})
     
@@ -339,7 +339,7 @@ def main():
     df_sampled["p0"] = df_sampled["ts"].map(ref_prices.to_dict()).fillna(0.0)
     print(f"    {len(df_sampled):,} events loaded")
 
-    # ── 4. Load grid ──────────────────────────────────────────────────
+    # -- 4. Load grid --------------------------------------------------
     print(f"\n[4] Loading barrier grid …")
     with open(args.grid, newline="", encoding="utf-8") as f:
         grid = list(csv.DictReader(f))
@@ -347,7 +347,7 @@ def main():
     candidates = grid[:args.candidates]
     print(f"    Processing {len(candidates)} candidate(s)")
 
-    # ── 5. Label each candidate ─────────────────────────────────────────
+    # -- 5. Label each candidate -----------------------------------------
     print(f"\n[5] First-touch labeling …")
     leaderboard = []
 
@@ -382,7 +382,7 @@ def main():
         out_path = args.output / label_name
 
         if out_path.exists() and not args.force:
-            print(f"  [{i}/{len(candidates)}] {vb}ticks pt={pt} sl={sl} → SKIP (exists)")
+            print(f"  [{i}/{len(candidates)}] {vb}ticks pt={pt} sl={sl} -> SKIP (exists)")
             with open(out_path, newline="", encoding="utf-8") as f:
                 existing = list(csv.DictReader(f))
             n = len(existing)
@@ -409,14 +409,14 @@ def main():
             snap_ts, snap_mid, df_sampled, vb, pt, sl, out_path
         )
         leaderboard.append(metrics)
-        print(f"    → PT={metrics['pct_pt']:.1f}%  "
+        print(f"    -> PT={metrics['pct_pt']:.1f}%  "
               f"SL={metrics['pct_sl']:.1f}%  "
               f"V={metrics['pct_vertical']:.1f}%  "
               f"bal={metrics['balance_ratio']:.3f}  "
               f"win={metrics['win_rate']:.1f}%  "
               f"payoff={metrics['payoff_theoretical']}")
 
-    # ── 6. Save leaderboard ─────────────────────────────────────────────
+    # -- 6. Save leaderboard ---------------------------------------------
     lboard_path = args.output / "phase7_labeling_leaderboard.csv"
     sorted_lb  = sorted(leaderboard,
                         key=lambda r: (-r["balance_ratio"], -r["win_rate"]))
@@ -424,13 +424,13 @@ def main():
         w = csv.DictWriter(f, fieldnames=LEADERBOARD_FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(sorted_lb)
-    print(f"\n[6] Leaderboard → {lboard_path}")
+    print(f"\n[6] Leaderboard -> {lboard_path}")
 
-    # ── Print top candidates ──────────────────────────────────────────────
-    print(f"\n{'─'*70}")
+    # -- Print top candidates ----------------------------------------------
+    print(f"\n{'-'*70}")
     print(f"{'vb':>5} {'PT':>5} {'SL':>5} {'ratio':>6}  {'bal':>5} {'win%':>6}  "
           f"{'payoff':>7}  {'PT%':>5} {'SL%':>5} {'V%':>5}")
-    print(f"{'─'*70}")
+    print(f"{'-'*70}")
     for r in sorted_lb[:10]:
         pf = r["payoff_theoretical"]
         pf_str = f"{pf:.3f}" if pf != float("inf") else "  inf"
@@ -453,7 +453,7 @@ def main():
 if __name__ == "__main__":
     main()
 
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 # BREAKING CHANGES — rispetto alla versione precedente
 #
 # 1. Grid CSV: colonna rinominata vertical_barrier_sec → vb_ticks
@@ -467,4 +467,4 @@ if __name__ == "__main__":
 # - vps_phase8_entry_model.py   ✓
 # - _pipeline_constants.py     ✓
 # - aggregate_results.py        ✓
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------

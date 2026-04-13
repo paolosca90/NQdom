@@ -15,40 +15,40 @@ DEPTH-DOM is a quantitative trading signal generation pipeline that processes Si
 ## Directory Structure
 
 ```
-DEPTH DOM VPS/
+NQdom/
 ├── CLAUDE.md                     ← questo file
 ├── PIPELINE_FASI_RIASSUNTO.md   ← riepilogo completo 12 fasi
 │
 ├── P1/   depth_parser.py, main.py, README.md
-├── P2/   vps_book_reconstructor.py, vps_book_reconstructor_fullnumba.py, README.md
-├── P2b/  vps_phase2b_data_fusion.py, README.md
+├── P2/   vps_book_reconstructor.py, README.md
+├── P2b/  vps_phase2b_data_fusion.py, compute_ts_features.py, README.md
 ├── P3/   vps_feature_engineering_vectorized.py, README.md
 ├── P4/   vps_feature_engineering_agg.py, README.md
 ├── P5/   vps_cusum_sampler.py, README.md
 ├── P6/   vps_excursion_analysis_vectorized.py, README.md
-├── P7/   vps_phase7_labeling.py, vps_p7_global_runner.py, README.md
-├── P7b/  vps_phase7b_macro_filter.py, README.md
+├── P7/   vps_phase7_labeling.py, README.md
 ├── P8/   vps_phase8_entry_model.py, README.md
 ├── P11/  vps_phase11_rl_execution.py, README.md
 ├── P12/  vps_phase12_sierra_bridge.py, README.md
 │
 ├── SHARED/
-│   ├── _pipeline_constants.py    ← costanti condivise
-│   ├── utils.py                  ← utilities condivise
+│   ├── _pipeline_constants.py    ← costanti condivise (singola fonte di verità)
 │   └── README.md
 │
 ├── ORCHESTRATOR/
-│   ├── vps_multiday_runner.py    ← batch orchestrator
+│   ├── vps_multiday_runner.py    ← batch orchestrator (VPS)
+│   ├── incremental_p7p8_runner.py ← P7/P8 incremental runner
+│   ├── run_p1_to_p7_multiday.py ← local P1-P7 multiday runner
 │   ├── audit_pipeline.py
 │   ├── status_live.py
+│   ├── aggregate_results.py
+│   ├── plot_dashboard.py
 │   ├── vps_watchdog.sh
 │   └── README.md
 │
 ├── INPUT/                        ← .depth source files
-│
-├── incremental_p7p8_runner.py     ← runner P7/P8 incrementale
-├── aggregate_results.py
-├── plot_dashboard.py
+├── INPUT_TS/                     ← Sierra Chart Time & Sales (.txt)
+├── output/                        ← output per giorno
 └── cron_orchestrator.sh
 ```
 
@@ -63,7 +63,7 @@ DEPTH DOM VPS/
   │         │
   ▼ P2 ──► snapshots.csv
   │         │
-  ▼ P2b ─► snapshots_fused.csv
+  ▼ P2b ─► snapshots_fused.csv  (LOB + Time & Sales)
   │         │
   ▼ P3 ──► features_dom.csv
   │         │
@@ -75,8 +75,6 @@ DEPTH DOM VPS/
   │         │
   ▼ P7 ──► phase7_labels_*/      (3 candidati triple-barrier)
   │         │
-  ▼ P7b ─► *_gex_pos/neg.csv     (filtro macro)
-  │         │
   ▼ P8 ──► model.pkl + report
   │
   ▼ P11 ─► Agente RL Actor-Critic  (live service)
@@ -84,19 +82,24 @@ DEPTH DOM VPS/
   ▼ P12 ─► Bridge TCP ──► Sierra Chart  (live service)
 ```
 
+**Time Filter:** P1 applica filtro UTC 13:40–19:50 (09:40–15:50 ET, EDT=UTC-4).
+Tutti i file successivi ereditano la finestra.
+
 ---
 
 ## 3 Candidati Triple-Barrier (P7)
 
 Definiti in `SHARED/_pipeline_constants.py` → `CANDIDATES`:
 
-| Candidato | Vertical Barrier | Profit Target | Stop Loss |
-|-----------|-----------------|---------------|-----------|
-| C1        | 30 ticks        | 9.5 ticks    | 9.8 ticks |
-| C2        | 60 ticks        | 20.0 ticks   | 20.0 ticks|
-| C3        | 120 ticks       | 13.0 ticks   | 14.5 ticks|
+| Candidato | Vertical Barrier | Profit Target | Stop Loss | Note |
+|-----------|-----------------|---------------|-----------|------|
+| C1        | 2000 ticks      | 10.0 ticks    | 10.0 ticks| Scalping corto |
+| C2        | 4000 ticks      | 20.0 ticks    | 20.0 ticks| Scalping medio |
+| C3        | 8000 ticks      | 40.0 ticks    | 40.0 ticks| Intraday swing |
 
 Vertical barrier unit: **TICK CLOCK** (book update count, NOT wall-clock seconds)
+- 2000 ticks ≈ 88.5% di eventi tocca PT o SL
+- Balance ratio ottimale: 0.974 (C1), 0.944 (C2), 0.865 (C3)
 
 ---
 
@@ -122,6 +125,18 @@ python3 /opt/depth-dom/incremental_p7p8_runner.py --output-dir /opt/depth-dom/ou
 ```
 
 Chiamato ogni 30 min dal cron job.
+
+### Local Multiday P1-P7 (Mac/Windows)
+
+```bash
+# Target a specific day — use P1/main.py directly (NOT multiday runner --days, that doesn't exist)
+python3 P1/main.py --days 2026-03-13 --force
+
+# Multi-day sequential (RAM-safe, --workers 1)
+python3 run_p1_to_p7_multiday.py --resume --workers 1
+
+# Multiday runner limits to first N days from earliest date — use P1/main.py for single-day targeting
+```
 
 ### Single Day Test — on VPS
 
@@ -149,7 +164,7 @@ Steps: (1) incremental_p7p8_runner, (2) aggregate_results, (3) plot_dashboard.
 ├── features_dom.csv       (P3) — ~310MB/day
 ├── features_dom_agg.csv   (P4)
 ├── sampled_events.csv     (P5) — kept permanently
-├── excursion_stats.csv     (P6) — kept permanently
+├── excursion_stats.csv    (P6) — kept permanently
 ├── phase7_labels_*/       (P7) — directories, one per candidate
 ├── _checkpoints/
 │   ├── p1_parse.done, p2_reconstruct.done, p2b_fusion.done, ...
@@ -167,10 +182,11 @@ Steps: (1) incremental_p7p8_runner, (2) aggregate_results, (3) plot_dashboard.
 
 2. **P2 crossed book not rejected** — **FIXED** in P2: `continue` skips snapshot when `best_bid >= best_ask`.
 
-**NOTE:** P2b (`vps_phase2b_data_fusion.py`) è ora fase ufficiale del flusso.
-Richiede `trades.csv` in `input/{date}/`. Se assente, P2b skippa con warning
-e il flusso continua. Tutti i dati P3→P8 prodotti senza P2b sono obsoleti
-e vanno rigenerati.
+3. **P7b (Macro Filter) DEPRECATO** — Rimosso dal pipeline. P8 usa direttamente `sampled_events.csv`.
+
+4. **P2b Sierra Chart CSV leading spaces** — **FIXED** in P2b: `pd.read_csv(skipinitialspace=True)` + column `.strip()` needed because Sierra exports columns with leading spaces (e.g. `" Time"`, `" Volume"`), causing format detection to fail.
+
+5. **P5 CUSUM h threshold floor** — h must be at least `2 * tick_size = 0.5` to avoid over-emission. Adaptive calibration doubles h until emission rate ≤ 10%.
 
 ---
 

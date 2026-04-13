@@ -1,10 +1,11 @@
 # P1 — Parsing Binario
 
 **Script:** `depth_parser.py`
-**Runner:** `main.py`
+**Runner:** `main.py` (anche `run_p1_to_p7_multiday.py`)
 
 ## Cosa fa
 Legge i file `.depth` binari di Sierra Chart (formato proprietario) e li converte in `events.csv`.
+Filtra automaticamente per la finestra UTC 13:40–19:50 (09:40–15:50 ET, EDT=UTC-4).
 
 ## Formato File .depth
 
@@ -42,15 +43,16 @@ Record (24 byte):
 - **Input:** `/opt/depth-dom/input/NQ*/YYYY-MM-DD.depth`
 - **Output:** `/opt/depth-dom/output/{date}/events.csv`
 - **Checkpoint:** `_checkpoints/p1_parse.done`
+- **Time filter:** 13:40–19:50 UTC (applicato in `records_to_csv_stream_filtered`)
 
 ## Utilizzo
 
 ```bash
-# Single day
+# Single day (VPS)
 python3 main.py --days 2026-01-08 --force
 
-# Oppure direttamente
-python3 depth_parser.py --input /opt/depth-dom/input/NQ*/2026-01-08.depth --output /opt/depth-dom/output/2026-01-08/events.csv
+# Local multiday (P1-P7)
+python3 run_p1_to_p7_multiday.py --days 2026-03-13
 ```
 
 ## Output CSV

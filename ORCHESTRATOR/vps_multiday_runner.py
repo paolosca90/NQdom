@@ -68,7 +68,7 @@ HAS_FILELOCK = False
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 VPS_BASE           = "/opt/depth-dom"
-INPUT_DIR_DEFAULT = "/opt/depth-dom/input"
+INPUT_DIR_DEFAULT = "/opt/depth-dom/INPUT"
 OUTPUT_DIR_DEFAULT= "/opt/depth-dom/output"
 
 # Disk safety thresholds
@@ -91,7 +91,6 @@ PHASE_NAMES = [
     "p1_parse", "p2_reconstruct", "p2b_fusion", "p3_features", "p4_agg",
     "p5_sample", "p6_excursion",
     "p7_c1", "p7_c2", "p7_c3",
-    "p7b_macro",
     "p8_ml",
 ]
 
@@ -343,7 +342,7 @@ def run_phase1(date: str, depth_path: Path, out_dir: Path,
 
     cp.set_phase(date, "p1_parse", PhaseStatus.RUNNING)
     print(f"    [P1] Parsing {depth_path.name} ...")
-    cmd = f"python3 main.py --days {date}{' --force' if force else ''} 2>&1"
+    cmd = f"python3 P1/main.py --input-dir {INPUT_DIR_DEFAULT} --days {date}{' --force' if force else ''} 2>&1"
     stdout, stderr, code, elapsed = run_cmd(cmd, timeout=7200, cwd=VPS_BASE)
 
     if code == 0 and events_path.exists():
@@ -572,6 +571,19 @@ def run_phase6(date: str, out_dir: Path,
 
     cp.set_phase(date, "p6_excursion", PhaseStatus.RUNNING)
     print(f"    [P6] Excursion analysis (Numba JIT) ...")
+
+    # Adaptive timeout based on snapshots file size.
+    # Large days (>3GB) need up to 2h; medium (1.5-3GB) need 1h; small (<1.5GB) need 30min.
+    import os
+    snapshots_size_gb = snapshots_path.stat().st_size / (1024**3)
+    if snapshots_size_gb > 3.0:
+        p6_timeout = 7200
+    elif snapshots_size_gb > 1.5:
+        p6_timeout = 3600
+    else:
+        p6_timeout = 1800
+    print(f"    [P6] Adaptive timeout: {p6_timeout}s (snapshots: {snapshots_size_gb:.1f}GB)")
+
     cmd = (
         f"python3 excursion_analysis.py "
         f"--features {features_path} "
@@ -581,8 +593,7 @@ def run_phase6(date: str, out_dir: Path,
         f"--plot {plot_path} "
         f"2>&1"
     )
-    # Timeout: Numba JIT version finishes in ~5-8 min per day (was 73h+ before)
-    stdout, stderr, code, elapsed = run_cmd(cmd, timeout=1200, cwd=VPS_BASE)
+    stdout, stderr, code, elapsed = run_cmd(cmd, timeout=p6_timeout, cwd=VPS_BASE)
 
     if code == 0 and excursion_path.exists():
         write_sentinel(out_dir, "p6_excursion")
@@ -676,64 +687,13 @@ def run_phase7(date: str, out_dir: Path,
     return all_ok, "" if all_ok else f"Only {labels_ok}/3 candidates labeled"
 
 
-# ── Phase 7b: Macro Filter ───────────────────────────────────────────────
-
-def run_phase7b(date: str, out_dir: Path,
-                cp: CheckpointManager, force: bool = False) -> tuple[bool, str]:
-    """Macro filter: removes infected Beta-Surprise zones and bifurcates GEX."""
-    if sentinel_done(out_dir, "p7b_macro") and not force:
-        print("    [P7b] Already done — SKIP")
-        return True, ""
-
-    sampled_path = out_dir / "sampled_events.csv"
-    if not sampled_path.exists():
-        return False, "sampled_events.csv missing"
-
-    cp.set_phase(date, "p7b_macro", PhaseStatus.RUNNING)
-    print(f"    [P7b] Applicazione filtri macroeconomici (GEX/Beta) ...")
-    
-    macro_script = Path(VPS_BASE) / "OPTIMIZATIONS" / "vps_phase7b_macro_filter.py"
-    cmd = (
-        f"python3 {macro_script} "
-        f"--input {sampled_path} "
-        f"--output-dir {out_dir} "
-        f"2>&1"
-    )
-    stdout, stderr, code, elapsed = run_cmd(cmd, timeout=3600, cwd=VPS_BASE)
-
-    if code == 0:
-        write_sentinel(out_dir, "p7b_macro")
-        cp.set_phase(date, "p7b_macro", PhaseStatus.DONE)
-        print(f"    [P7b] Filtraggio macro terminato in {elapsed:.0f}s — DONE")
-        return True, ""
-    else:
-        msg = stderr[:300] if stderr else "Errore Phase 7b script"
-        write_sentinel(out_dir, "p7b_macro", "failed", msg)
-        cp.set_phase(date, "p7b_macro", PhaseStatus.FAILED, msg)
-        return False, msg
-
-
 # ── Phase 8: Entry Model ──────────────────────────────────────────────────────
 
 def run_phase8(date: str, out_dir: Path,
               cp: CheckpointManager,
               force: bool = False) -> tuple[bool, str]:
     """ML entry model training logic on target regime DataFrame."""
-    if (out_dir / ".macro_dropped").exists() and not force:
-        print("    [P8] Giornata scartata dai filtri Macro (P7b) — SKIP")
-        write_sentinel(out_dir, "p8_ml", "skipped", "Macro dropped")
-        cp.set_phase(date, "p8_ml", PhaseStatus.SKIPPED, "Macro Dropped")
-        return True, ""
-
-    sampled_pos = out_dir / "sampled_events_gex_pos.csv"
-    sampled_neg = out_dir / "sampled_events_gex_neg.csv"
-
-    if sampled_pos.exists():
-        sampled_path = sampled_pos
-    elif sampled_neg.exists():
-        sampled_path = sampled_neg
-    else:
-        sampled_path = out_dir / "sampled_events.csv"
+    sampled_path = out_dir / "sampled_events.csv"
 
     if not sampled_path.exists():
         return False, f"{sampled_path.name} missing"
@@ -1069,13 +1029,7 @@ def process_day(
                 cp.finalize(date, "failed", err, time.time()-t0, 0)
                 return "failed", err, time.time()-t0, 0
 
-        # ── Phase 7b ───────────────────────────────────────────────────────
-        if not skip_p7_p8:
-            ok, err = run_phase7b(date, out_dir, cp, force)
-            if not ok:
-                cp.finalize(date, "failed", err, time.time()-t0, 0)
-                return "failed", err, time.time()-t0, 0
-
+        
         # ── Phase 8 ────────────────────────────────────────────────────────
         if not skip_p7_p8:
             ok, err = run_phase8(date, out_dir, cp, force)
@@ -1206,6 +1160,8 @@ Examples:
                    help="Assume P1-P6 outputs already exist (skip to P7)")
     ap.add_argument("--skip-p7-p8", action="store_true",
                    help="Skip P7/P8 phases (run P1-P6 only)")
+    ap.add_argument("--skip-p8", action="store_true",
+                   help="Skip P8 phase only (run P1-P7)")
 
     args = ap.parse_args()
 

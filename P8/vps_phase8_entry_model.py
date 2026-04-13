@@ -5,10 +5,19 @@ Build a baseline multiclass entry model (short/flat/long) using DOM features
 and first-touch triple-barrier labels from Phase 7.
 
   CANDIDATES (from _pipeline_constants.py):
-    C1: vb_ticks=30,  pt_ticks=9.5,  sl_ticks=9.8
-    C2: vb_ticks=60,  pt_ticks=20.0, sl_ticks=20.0
-    C3: vb_ticks=120, pt_ticks=13.0, sl_ticks=14.5
+    C1: vb_ticks=2000, pt_ticks=10.0, sl_ticks=10.0  (scalping corto)
+    C2: vb_ticks=4000, pt_ticks=20.0, sl_ticks=20.0  (scalping medio)
+    C3: vb_ticks=8000, pt_ticks=40.0, sl_ticks=40.0  (intraday swing)
   Vertical barrier unit: TICK CLOCK (book update count, NOT seconds)
+
+  NEW ARCHITECTURE (from NotebookLM Deep LOB research):
+    Trading hours: 09:40–15:50 ET (excludes first/last 10 min of auction noise)
+    Execution cadence: positions open every 5 min between 09:45–15:30 ET
+    Neutral band: ±2 bps around 0 (5-min averaging window)
+    Cost: 1 bp round-turn (~$25 NQ, ~$10 ES)
+    PT threshold: 53-54% OOS before deploying deep nets (UCL DeepLOB)
+    Features: P2b TS features (ΔL, ΔM, ΔC), stacked imbalances, volume sequencing,
+              bid/ask fade, closing delta extremes, TICK Z-score internals
 
 OUTPUTS
   phase8_dataset_summary.csv
@@ -63,14 +72,35 @@ from sklearn.metrics import (
     classification_report, confusion_matrix, log_loss,
 )
 from sklearn.preprocessing import StandardScaler
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "SHARED"))
 from _pipeline_constants import CANDIDATES, ALL_FEATURE_PATTERNS, label_filename
 
 # ── constants ─────────────────────────────────────────────────────────────────
+# NEW ARCHITECTURE: Trading hours 09:40–15:50 ET (EDT = UTC-4, excludes first/last 10 min of auctions)
+# UTC: 13:40–19:50 (RTH 09:30–16:00 ET minus first/last 10 min)
+# In EDT (UTC-4, active March–November): 09:30 ET = 13:30 UTC, 16:00 ET = 20:00 UTC
+# Execution: positions open every 5 min between 09:45–15:30 ET, exit 15:55–16:00 ET
+# Split: 70/15/15 of the 13:40–19:50 UTC window (370 min → 259/56/55 min)
 SPLITS = {
-    "train": ("00:00:00.000000", "06:00:00.000000"),
-    "val":   ("06:00:00.000000", "08:00:00.000000"),
-    "test":  ("08:00:00.000000", "09:30:00.000000"),
+    "train": ("13:40:00.000000", "18:00:00.000000"),  # 09:40–14:00 ET (4h20m = 260m ≈ 70%)
+    "val":   ("18:00:00.000000", "18:55:00.000000"),  # 14:00–14:55 ET (55min ≈ 15%)
+    "test":  ("18:55:00.000000", "19:50:00.000000"),  # 14:55–15:50 ET (55min ≈ 15%)
 }
+
+# NEW ARCHITECTURE: Neutral stability band (DeepLOB ±2 bps on 5-min averaging window)
+NEUTRAL_BAND_BPS = 0.0002   # ±2 basis points — flat when |mid_change_5m| < this
+
+# NEW ARCHITECTURE: PT threshold for escalating to deep neural nets (UCL DeepLOB paper)
+PT_THRESHOLD_DEEPLOB = 0.53  # 53% OOS — must exceed before CNN+LSTM deployment
+
+# NEW ARCHITECTURE: Execution cadence (DeepLOB benchmark)
+EXEC_INTERVAL_MIN = 5         # open positions every 5 minutes
+EXEC_START_ET = "09:45"       # first entry window
+EXEC_END_ET = "15:30"         # last entry window
+EXIT_START_ET = "15:55"       # begin forced exit
+EXIT_END_ET = "16:00"         # all positions closed by
 
 # Label mapping: -1→0 (short), 0→1 (flat), +1→2 (long)
 LABEL_MAP   = {-1: 0, 0: 1, 1: 2}
@@ -533,13 +563,17 @@ def main():
         unique_dates = sorted(list(set(ts[:10] for ts in aligned_ts)))
         n_days = len(unique_dates)
         
-        if n_days < 3:
-            print(f"    [AUTO-DETECT] {n_days} giorni rilevati (< 3). Fallback su split Intra-Day orario.")
+        if n_days < 2:
+            print(f"    [AUTO-DETECT] {n_days} giorno(i) rilevato(i) (< 2). Fallback su split Intra-Day orario (SPLITS).")
             train_mask = split_mask_intraday(aligned_ts, "train")
             val_mask   = split_mask_intraday(aligned_ts, "val")
             test_mask  = split_mask_intraday(aligned_ts, "test")
         else:
-            print(f"    [AUTO-DETECT] {n_days} giorni rilevati. Uso Walk-Forward Multi-Day split.")
+            print(f"    [AUTO-DETECT] {n_days} giorni rilevati. Uso Walk-Forward Multi-Day split (no intra-day per evitare bias orario).")
+            train_pct, val_pct = args.train_pct, args.val_pct
+            train_mask = split_mask_multiday(aligned_ts, "train", unique_dates, train_pct, val_pct)
+            val_mask   = split_mask_multiday(aligned_ts, "val", unique_dates, train_pct, val_pct)
+            test_mask  = split_mask_multiday(aligned_ts, "test", unique_dates, train_pct, val_pct)
             train_pct, val_pct = args.train_pct, args.val_pct
             train_mask = split_mask_multiday(aligned_ts, "train", unique_dates, train_pct, val_pct)
             val_mask   = split_mask_multiday(aligned_ts, "val", unique_dates, train_pct, val_pct)

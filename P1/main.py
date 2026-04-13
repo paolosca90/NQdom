@@ -26,6 +26,7 @@ from P1.depth_parser import (
     read_header,
     validate_header,
     records_to_csv_stream,
+    records_to_csv_stream_filtered,
 )
 from P2.vps_book_reconstructor import reconstruct
 from P3.vps_feature_engineering_vectorized import compute_features_chunked
@@ -74,9 +75,17 @@ def ensure_output_dir(base_dir: Path, date_str: str) -> Path:
 # Phase 1 - Streaming parser (no memory accumulation)
 # ---------------------------------------------------------------------------
 
+# UTC time filter — aligned to DeepLOB architecture (EDT = UTC-4)
+P1_START_UTC_HOUR = 13
+P1_START_UTC_MIN = 40
+P1_END_UTC_HOUR = 19
+P1_END_UTC_MIN = 50
+
+
 def run_phase1(depth_path: Path, events_path: Path, force: bool = False) -> tuple[bool, DepthHeader, int, list[str]]:
     """
-    Parse .depth file and stream to events.csv.
+    Parse .depth file and stream to events.csv, keeping only records
+    in the UTC window 13:40–19:50 (09:40–15:50 ET, filtered RTH).
     Returns (skipped, header, record_count, warnings).
     If events.csv already exists and force=False, skips parsing.
     """
@@ -88,7 +97,7 @@ def run_phase1(depth_path: Path, events_path: Path, force: bool = False) -> tupl
         record_count = (depth_path.stat().st_size - 64) // 24
         return True, header, record_count, warnings
 
-    print(f"  Parsing {depth_path.name} ...")
+    print(f"  Parsing {depth_path.name} (UTC {P1_START_UTC_HOUR:02d}:{P1_START_UTC_MIN:02d} -> {P1_END_UTC_HOUR:02d}:{P1_END_UTC_MIN:02d}) ...")
     with open(depth_path, "rb") as fh:
         header = read_header(fh)
         warnings = validate_header(header)
@@ -100,11 +109,15 @@ def run_phase1(depth_path: Path, events_path: Path, force: bool = False) -> tupl
                 "num_orders", "price", "quantity",
             ])
             writer.writeheader()
-            record_count, parse_warnings = records_to_csv_stream(fh, writer)
+            written, total, parse_warnings = records_to_csv_stream_filtered(
+                fh, writer,
+                P1_START_UTC_HOUR, P1_START_UTC_MIN,
+                P1_END_UTC_HOUR, P1_END_UTC_MIN,
+            )
             warnings.extend(parse_warnings)
 
-    print(f"  -> {record_count:,} records -> {events_path.name}")
-    return False, header, record_count, warnings
+    print(f"  -> {written:,} records written (of {total:,} total) -> {events_path.name}")
+    return False, header, written, warnings
 
 
 def _read_header_only(path: Path) -> DepthHeader:
@@ -370,7 +383,7 @@ def main() -> int:
     args = parser.parse_args()
 
     base_dir = Path(__file__).parent.parent
-    input_dir = args.input_dir or (base_dir / "input")
+    input_dir = args.input_dir or (base_dir / "INPUT")
     force = args.force
 
     if not input_dir.exists():

@@ -1,7 +1,6 @@
 # P2 — Ricostruzione Order Book
 
 **Script:** `vps_book_reconstructor.py`
-**Variante:** `vps_book_reconstructor_fullnumba.py` (full Numba, più lento ma completo)
 
 ## Cosa fa
 Ricostruisce lo stato completo del Limit Order Book applicando ogni evento di `events.csv`.

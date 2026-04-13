@@ -123,10 +123,10 @@ def compute_features_vectorized(df: pd.DataFrame, prev_df: pd.DataFrame | None) 
 
     # === SPATIAL FEATURES (Actual LOB Depth Xi) ===
     # Using the formal academic metric for LOB spread (Xi).
-    bid_px_1 = to_float_series(df.get('bid_px_1', df['best_bid']))
-    bid_px_10 = to_float_series(df.get('bid_px_10', df['best_bid'] - 9 * TICK_SIZE))
-    ask_px_1 = to_float_series(df.get('ask_px_1', df['best_ask']))
-    ask_px_10 = to_float_series(df.get('ask_px_10', df['best_ask'] + 9 * TICK_SIZE))
+    bid_px_1 = to_float_series(df['bid_px_1']) if 'bid_px_1' in df.columns else to_float_series(df['best_bid'])
+    bid_px_10 = to_float_series(df['bid_px_10'] if 'bid_px_10' in df.columns else df['best_bid'] - 9 * TICK_SIZE)
+    ask_px_1 = to_float_series(df['ask_px_1']) if 'ask_px_1' in df.columns else to_float_series(df['best_ask'])
+    ask_px_10 = to_float_series(df['ask_px_10'] if 'ask_px_10' in df.columns else df['best_ask'] + 9 * TICK_SIZE)
 
     result['actual_depth_bid_Xi'] = (bid_px_1 - bid_px_10) / TICK_SIZE
     result['actual_depth_ask_Xi'] = (ask_px_10 - ask_px_1) / TICK_SIZE
@@ -169,8 +169,8 @@ def compute_features_vectorized(df: pd.DataFrame, prev_df: pd.DataFrame | None) 
     has_trades = 'traded_vol_bid' in df.columns and 'traded_vol_ask' in df.columns
     
     if has_trades:
-        tr_bid = to_float_series(df['traded_vol_bid']).values
-        tr_ask = to_float_series(df['traded_vol_ask']).values
+        tr_bid = to_float_series(df['traded_vol_bid'])
+        tr_ask = to_float_series(df['traded_vol_ask'])
         
         # Market sweeps match the missing LOB volumes.
         # Cancellation = Total Volume Removed (pull) - Trade Volume 
@@ -366,18 +366,19 @@ def compute_features_chunked(
             t1 = time.time()
             print(f"  Chunk {chunk_num}: {len(chunk_df):,} rows in {t1-t0:.2f}s ({len(chunk_df)/(t1-t0):,.0f} rows/sec)")
 
-    # Concatenate all temp files into final output using `cat` (zero RAM overhead)
-    print(f"\n  Concatenating {len(temp_files)} temp files with cat...")
+    # Concatenate all temp files into final output using Python's shutil (RAM-safe, zero overhead)
+    print(f"\n  Concatenating {len(temp_files)} temp files...")
     t_cat = time.time()
 
-    # Write header, then append all chunks via cat
+    import shutil
     with open(output_path, 'w', newline='', encoding='utf-8') as fout:
         writer = csv.writer(fout)
         writer.writerow(output_cols)
-
-    for tf in temp_files:
-        subprocess.run(['cat', str(tf)], stdout=open(output_path, 'a'), stderr=subprocess.DEVNULL)
-        tf.unlink()  # Delete temp file after appending
+        
+        for tf in temp_files:
+            with open(tf, 'r', encoding='utf-8') as fin:
+                shutil.copyfileobj(fin, fout)
+            tf.unlink()  # Delete temp file after appending
 
     t_cat_end = time.time()
     print(f"  Concatenation done in {t_cat_end-t_cat:.1f}s")

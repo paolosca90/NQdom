@@ -101,8 +101,8 @@ def load_trades(trades_path: Path):
       (mappatura automatica -> canonico)
     """
     try:
-        df = pd.read_csv(trades_path)
-        df.columns = [c.lower() for c in df.columns]
+        df = pd.read_csv(trades_path, skipinitialspace=True)
+        df.columns = [c.lower().strip() for c in df.columns]
 
         # Rileva formato
         canonical_cols = {"ts", "price", "size", "side"}
@@ -160,17 +160,21 @@ def fuse_chunk(snap_chunk: pd.DataFrame, trades_df: pd.DataFrame) -> pd.DataFram
     
     t_sell['cum_sell'] = t_sell['size'].cumsum()
     t_buy['cum_buy']   = t_buy['size'].cumsum()
-    
+
     # 2. AsOf Merge BACKWARD rispetto allo snapshot (solo i trades ESATTAMENTE <= T)
-    snap_ref = snap_chunk[['ts_dt']].copy()
-    
+    # merge_asof richiede ESPLICITAMENTE che entrambi i DataFrame siano sortati per la chiave
+    # e che non contengano null — drop null ts da snap_ref prima del merge
+    snap_ref = snap_chunk[['ts_dt']].copy().dropna(subset=['ts_dt']).sort_values('ts_dt').reset_index(drop=True)
+    t_sell_sorted = t_sell[['ts_dt', 'cum_sell']].sort_values('ts_dt').reset_index(drop=True)
+    t_buy_sorted = t_buy[['ts_dt', 'cum_buy']].sort_values('ts_dt').reset_index(drop=True)
+
     # Mergiamo il cum_sell
-    merged_s = pd.merge_asof(snap_ref, t_sell[['ts_dt', 'cum_sell']], on='ts_dt', direction='backward')
-    merged_s['cum_sell'] = merged_s['cum_sell'].fillna(method='ffill').fillna(0.0)
-    
+    merged_s = pd.merge_asof(snap_ref, t_sell_sorted, on='ts_dt', direction='backward')
+    merged_s['cum_sell'] = merged_s['cum_sell'].ffill().fillna(0.0)
+
     # Mergiamo il cum_buy
-    merged_b = pd.merge_asof(snap_ref, t_buy[['ts_dt', 'cum_buy']], on='ts_dt', direction='backward')
-    merged_b['cum_buy'] = merged_b['cum_buy'].fillna(method='ffill').fillna(0.0)
+    merged_b = pd.merge_asof(snap_ref, t_buy_sorted, on='ts_dt', direction='backward')
+    merged_b['cum_buy'] = merged_b['cum_buy'].ffill().fillna(0.0)
     
     # 3. Differenziamo i cumulativi per trovare lo snap esatto (Delta M)
     snap_chunk['traded_vol_bid'] = merged_s['cum_sell'].diff().fillna(merged_s['cum_sell'].iloc[0])
