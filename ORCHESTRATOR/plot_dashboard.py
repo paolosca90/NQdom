@@ -18,8 +18,8 @@ OUTPUT
 
 USAGE
     python3 plot_dashboard.py \\
-        --agg-dir /opt/depth-dom/output/aggregate \\
-        --out-dir /opt/depth-dom/output/aggregate \\
+        --agg-dir NQdom/output/aggregate \\
+        --out-dir NQdom/output/aggregate \\
         --style dark \\
         --dpi 300
 """
@@ -373,16 +373,20 @@ def main():
         print("[ERROR] matplotlib is not installed")
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="Plot aggregate dashboard")
-    parser.add_argument("--agg-dir", default=VPS_BASE + "/output/aggregate",
+    # Auto-detect local paths
+    script_dir = Path(__file__).parent.resolve()
+    repo_root = script_dir.parent
+    default_agg = str(repo_root / "output" / "aggregate")
+
+    parser = argparse.ArgumentParser(description="Plot aggregate dashboard (LOCAL)")
+    parser.add_argument("--agg-dir", default=default_agg,
                         help="Directory containing aggregate CSV files")
-    parser.add_argument("--out-dir", default=VPS_BASE + "/output/aggregate",
+    parser.add_argument("--out-dir", default=default_agg,
                         help="Output directory for PNG files")
     parser.add_argument("--style", default="dark", choices=["dark", "light"])
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()
 
-    VPS_BASE = "/opt/depth-dom"
     agg_dir = Path(args.agg_dir)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

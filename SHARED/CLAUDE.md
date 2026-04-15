@@ -65,6 +65,5 @@ parse_ts_to_ms(ts_str)                         # ISO ts → ms-from-midnight
 
 ## Note
 
-Questa directory è sincronizzata con VPS (`/opt/depth-dom/`).
 Le versioni locali sono la **fonte di verità**.
 CANDIDATES deve essere allineato con `_candidates_3.csv` in output/.

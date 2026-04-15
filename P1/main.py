@@ -151,7 +151,7 @@ def run_phase2b(snapshots_path: Path, force: bool = False) -> tuple[bool, dict]:
     """
     Fuse snapshots.csv with trades.csv (Time & Sales) to add tradedvolbid/tradedvolask.
     Trades are sourced from the pre-split per-day canonical file at:
-      /opt/depth-dom/OUTPUT_TS/by_day/{YYYY-MM-DD}/trades.csv
+      NQdom/INPUT_TS/by_day/{YYYY-MM-DD}/trades.csv
 
     Architecture note:
       TS preprocessing is PERSISTENT and ASYNC from depth availability.
@@ -166,7 +166,7 @@ def run_phase2b(snapshots_path: Path, force: bool = False) -> tuple[bool, dict]:
     from P2b.vps_phase2b_data_fusion import load_trades, fuse_chunk
     import pandas as pd
 
-    TS_BY_DAY_BASE = Path("/opt/depth-dom/OUTPUT_TS/by_day")
+    TS_BY_DAY_BASE = Path(__file__).parent.parent / "INPUT_TS" / "by_day"
 
     sentinel_path = snapshots_path.parent / "_checkpoints" / "p2b_fusion.done"
     sentinel_path.parent.mkdir(parents=True, exist_ok=True)
@@ -177,7 +177,7 @@ def run_phase2b(snapshots_path: Path, force: bool = False) -> tuple[bool, dict]:
 
     if not trades_path.exists():
         print(f"  [P2b] WARNING: {trades_path} not found — SKIP (TS may not be pre-split yet)")
-        return True, {"status": "skipped", "reason": f"trades.csv not found in OUTPUT_TS/by_day/{date_str}"}
+        return True, {"status": "skipped", "reason": f"trades.csv not found in INPUT_TS/by_day/{date_str}"}
 
     if not force and sentinel_path.exists():
         print(f"  [SKIP] p2b_fusion.done exists — use --force to reprocess")
@@ -443,7 +443,7 @@ def main() -> int:
         # Phase 2
         skipped_p2, p2_stats = run_phase2(events_path, snapshots_path, force)
 
-        # Phase 2b — trades sourced from OUTPUT_TS/by_day/{date}/trades.csv
+        # Phase 2b — trades sourced from INPUT_TS/by_day/{date}/trades.csv
         skipped_p2b, p2b_stats = run_phase2b(snapshots_path, force)
 
         # Phase 3

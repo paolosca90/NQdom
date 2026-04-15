@@ -5,8 +5,8 @@ split_sierra_trades_by_day.py — STEP 0B Preprocessing Layer
 Sierra Chart Time & Sales contract-file → per-day canonical trades.
 
 Architecture:
-  /opt/depth-dom/INPUT_TS/             ← raw Sierra exports (NQH26-CME.txt, NQM26-CME.txt, ...)
-  /opt/depth-dom/OUTPUT_TS/by_day/     ← pre-split daily trades (persistent, date-keyed)
+  NQdom/INPUT_TS/              ← raw Sierra exports (NQH26-CME.txt, NQM26-CME.txt, ...)
+  NQdom/INPUT_TS/by_day/        ← pre-split daily trades (persistent, date-keyed)
       YYYY-MM-DD/
           trades.csv
           _meta.json
@@ -15,21 +15,21 @@ Design principle:
   TS preprocessing is PERSISTENT and ASYNC from depth availability.
   A contract file is split ONCE into daily files. When a depth day arrives
   (even weeks later), run_phase2b() finds the matching trades already present
-  at OUTPUT_TS/by_day/{DAY}/trades.csv and consumes it automatically.
+  at INPUT_TS/by_day/{DAY}/trades.csv and consumes it automatically.
   Runtime P2b is contract-agnostic — matching is only by date.
 
-Default split mode: ALL contract days → OUTPUT_TS/by_day/
+Default split mode: ALL contract days → INPUT_TS/by_day/
   (use --only-days-present-in-output to restrict to already-processed depth days)
 
 Usage:
   # Default: split all days in the contract file
-  python3 split_sierra_trades_by_day.py --input /opt/depth-dom/INPUT_TS/NQH26-CME.txt
+  python3 split_sierra_trades_by_day.py --input NQdom/INPUT_TS/NQH26-CME.txt
 
   # Audit mode: only materialize days that already exist in OUTPUT/
   python3 split_sierra_trades_by_day.py \
-      --input /opt/depth-dom/INPUT_TS/NQM26-CME.txt \
+      --input NQdom/INPUT_TS/NQM26-CME.txt \
       --only-days-present-in-output \
-      --output-ref-dir /opt/depth-dom/OUTPUT/
+      --output-ref-dir NQdom/output/
 
   # Force overwrite of specific conflicting days
   python3 split_sierra_trades_by_day.py --input ... --force-rebuild-day
@@ -49,9 +49,11 @@ from typing import Iterator
 # Constants
 # ---------------------------------------------------------------------------
 
-TS_OUTPUT_BASE = Path("/opt/depth-dom/OUTPUT_TS/by_day")
-TS_CONTRACTS_DIR = Path("/opt/depth-dom/INPUT_TS")
-OUTPUT_BASE = Path("/opt/depth-dom/output")
+SCRIPT_DIR = Path(__file__).parent.resolve()
+REPO_ROOT = SCRIPT_DIR.parent
+TS_OUTPUT_BASE = REPO_ROOT / "INPUT_TS" / "by_day"
+TS_CONTRACTS_DIR = REPO_ROOT / "INPUT_TS"
+OUTPUT_BASE = REPO_ROOT / "output"
 
 CHUNK_SIZE = 100_000  # rows per read chunk — RAM-safe for large files
 
@@ -250,7 +252,7 @@ def parse_date_from_canonical_row(row: dict) -> str | None:
 
 class PerDayTradeWriter:
     """
-    Writes trades to OUTPUT_TS/by_day/{YYYY-MM-DD}/trades.csv
+    Writes trades to INPUT_TS/by_day/{YYYY-MM-DD}/trades.csv
     with _meta.json written after CSV is flushed.
 
     Tracks: rows_written, skipped_ambiguous, skipped_zero, per-day stats.
@@ -371,7 +373,7 @@ class PerDayTradeWriter:
         blocked, existing_contract = self._check_conflict(day)
         if blocked:
             print(
-                f"  CONFLICT: day {day} already exists in OUTPUT_TS/by_day from contract {existing_contract}.\n"
+                f"  CONFLICT: day {day} already exists in INPUT_TS/by_day from contract {existing_contract}.\n"
                 f"           This may be a normal rollover overlap. Verify which contract should own the day,\n"
                 f"           then re-run with --force-rebuild-day only if overwrite is intentional."
             )
@@ -461,7 +463,7 @@ def split_contract(
     Parameters
     ----------
     input_path     : path to the raw Sierra contract export
-    output_base    : base directory for OUTPUT_TS/by_day/
+    output_base    : base directory for INPUT_TS/by_day/
     contract_code  : e.g. "NQH26"
     split_mode     : "all_contract_days" or "only_days_present_in_output"
     allowed_days   : set of YYYY-MM-DD strings (for filtering mode)
@@ -582,7 +584,7 @@ def _print_summary(s: dict, split_mode: str, elapsed_s: float):
 def discover_output_days(output_ref_dir: Path) -> set[str]:
     """
     Return set of YYYY-MM-DD strings for all day directories already present
-    in output_ref_dir (e.g. /opt/depth-dom/OUTPUT/).
+    in output_ref_dir (e.g. NQdom/output/).
     """
     if not output_ref_dir.exists():
         return set()
@@ -614,11 +616,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  # Default: split all days in the contract\n"
-            "  python3 split_sierra_trades_by_day.py --input /opt/depth-dom/INPUT_TS/NQH26-CME.txt\n"
+            "  python3 split_sierra_trades_by_day.py --input NQdom/INPUT_TS/NQH26-CME.txt\n"
             "\n"
             "  # Only materialize days already present in OUTPUT/\n"
             "  python3 split_sierra_trades_by_day.py --input ... \\\n"
-            "      --only-days-present-in-output --output-ref-dir /opt/depth-dom/output/\n"
+            "      --only-days-present-in-output --output-ref-dir NQdom/output/\n"
             "\n"
             "  # Force overwrite of existing conflicting days\n"
             "  python3 split_sierra_trades_by_day.py --input ... --force-rebuild-day\n"
@@ -667,7 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--force-rebuild-day",
         action="store_true",
-        help="Overwrite days that already exist in OUTPUT_TS/by_day/ (default: block on conflict)",
+        help="Overwrite days that already exist in INPUT_TS/by_day/ (default: block on conflict)",
     )
     ap.add_argument(
         "--max-rows",

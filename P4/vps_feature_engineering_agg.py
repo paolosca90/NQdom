@@ -271,7 +271,7 @@ def aggregate_features_chunked(
     
     first_chunk = True
     last_overlap = pd.DataFrame()
-    chunksize = 250_000
+    chunksize = 2_000_000  # 30s overlap = ~1.5M rows at 50K/sec → 75% of 2M, OK
     rows_proc = 0
     import gc
     from collections import deque
@@ -280,11 +280,13 @@ def aggregate_features_chunked(
 
     with pd.read_csv(input_path, usecols=needed_cols, chunksize=chunksize, iterator=True) as reader:
         for chunk in reader:
-            # Parse datetime correctly for timezone-naive timestamps
-            chunk['ts'] = chunk['ts'].astype(str).str.slice(0, 26)
-            chunk['ts_dt'] = pd.to_datetime(chunk['ts'], format='%Y-%m-%d %H:%M:%S.%f', errors='coerce')
-            # Drop rows where timestamp parsing failed (NaT) — rolling() can't handle NaT in index
-            chunk = chunk.dropna(subset=['ts_dt'])
+            # Parse datetime — strip trailing UTC/utc before parsing
+            # Historical data: '2026-03-13 13:40:00.000000 UTC'
+            # New data:       '2026-04-10 13:40:00.000000' or ISO with +00:00
+            ts_col = chunk['ts'].str.replace(r'\s+UTC$', '', regex=True).str.replace(r'\s+utc$', '', regex=True)
+            chunk['ts_dt'] = pd.to_datetime(ts_col, format='ISO8601', errors='coerce')
+            # Do NOT drop rows — maintain 1:1 alignment with features_dom.csv
+            # Rows that fail to parse get NaT index; rolling on NaT produces NaN (filled with 0.0 below)
             chunk.set_index('ts_dt', inplace=True)
             
             # Track ts for report
@@ -299,8 +301,25 @@ def aggregate_features_chunked(
             else:
                 df = chunk
 
-            # Guard: if index has duplicates after concat, sort to prevent
-            # "index values must be monotonic" in rolling operations
+            # Guard: drop NaT rows first (sort_index crashes on NaT index),
+            # then sort if needed for rolling operations
+            nat_mask = df.index.isna()
+            if nat_mask.any():
+                n_nat = nat_mask.sum()
+                if first_chunk:
+                    pass  # just log on first chunk
+                df = df[~nat_mask]
+            if df.empty:
+                # Nothing to process in this chunk; save overlap and continue
+                last_ts = chunk.index[-1]
+                cutoff_time = last_ts - pd.Timedelta(seconds=30)
+                last_overlap = chunk.loc[chunk.index > cutoff_time] if len(chunk) > 0 else pd.DataFrame()
+                first_chunk = False
+                rows_proc += 0
+                print(f"  Phase 4: {rows_proc:,} rows | Chunk empty after NaT removal, skipping.")
+                del chunk, df
+                gc.collect()
+                continue
             if df.index.has_duplicates:
                 df = df.sort_index()
 

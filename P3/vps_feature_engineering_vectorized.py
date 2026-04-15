@@ -121,15 +121,118 @@ def compute_features_vectorized(df: pd.DataFrame, prev_df: pd.DataFrame | None) 
         np.where(bid_depth_5 > 0, MAX_DEPTH_RATIO, 1.0)
     )
 
-    # === SPATIAL FEATURES (Actual LOB Depth Xi) ===
-    # Using the formal academic metric for LOB spread (Xi).
-    bid_px_1 = to_float_series(df['bid_px_1']) if 'bid_px_1' in df.columns else to_float_series(df['best_bid'])
-    bid_px_10 = to_float_series(df['bid_px_10'] if 'bid_px_10' in df.columns else df['best_bid'] - 9 * TICK_SIZE)
-    ask_px_1 = to_float_series(df['ask_px_1']) if 'ask_px_1' in df.columns else to_float_series(df['best_ask'])
-    ask_px_10 = to_float_series(df['ask_px_10'] if 'ask_px_10' in df.columns else df['best_ask'] + 9 * TICK_SIZE)
+    # === DIAGONAL STACKED IMBALANCES ===
+    # Detect when 3+ consecutive LOB levels all show ask_qty > bid_qty (or vice versa)
+    # by a ratio >= 300%. This is the institutional "sweep" footprint.
+    STACKED_RATIO = 3.0   # 300% threshold
+    MIN_LEVELS = 3        # minimum consecutive levels
 
-    result['actual_depth_bid_Xi'] = (bid_px_1 - bid_px_10) / TICK_SIZE
-    result['actual_depth_ask_Xi'] = (ask_px_10 - ask_px_1) / TICK_SIZE
+    # Per-level dominance flags: shape [n_rows, 10]
+    ask_dominates = (ask_qty_df > bid_qty_df * STACKED_RATIO)  # ask > 3x bid
+    bid_dominates = (bid_qty_df > ask_qty_df * STACKED_RATIO)  # bid > 3x ask
+
+    # Count consecutive dominated levels from level 1 outward
+    # Vectorized: cumulative product resets at first False
+    # ask-side stacking count (how many levels from L1 are consecutively ask-dominated)
+    ask_stack_count = np.zeros(len(df), dtype=np.int8)
+    bid_stack_count = np.zeros(len(df), dtype=np.int8)
+
+    # Use cumulative product trick: running streak from level 0
+    ask_streak = ask_dominates[:, 0].astype(np.int8)
+    bid_streak = bid_dominates[:, 0].astype(np.int8)
+    ask_stack_count += ask_streak
+    bid_stack_count += bid_streak
+
+    for lvl in range(1, 10):
+        ask_streak = ask_streak * ask_dominates[:, lvl].astype(np.int8)
+        bid_streak = bid_streak * bid_dominates[:, lvl].astype(np.int8)
+        ask_stack_count += ask_streak
+        bid_stack_count += bid_streak
+
+    # Final features
+    result['stacked_imb_ask'] = ask_stack_count           # int8: 0-10
+    result['stacked_imb_bid'] = bid_stack_count           # int8: 0-10
+    result['stacked_imb_score'] = (                       # int8: -10 to +10
+        ask_stack_count.astype(np.int16) - bid_stack_count.astype(np.int16)
+    ).clip(-127, 127).astype(np.int8)
+    result['stacked_imb_flag_ask'] = (ask_stack_count >= MIN_LEVELS).astype(np.int8)
+    result['stacked_imb_flag_bid'] = (bid_stack_count >= MIN_LEVELS).astype(np.int8)
+
+    # === EXHAUSTION / THIN PRINTS ===
+    # DOM-native equivalent of bar exhaustion: flag when L1 has near-zero quantity.
+    THIN_THRESHOLD = 2.0  # contracts — tune based on NQ typical L1 size
+
+    # Ask side thin: very little ask volume at L1 (potential exhaustion of sellers)
+    result['exhaustion_ask_thin'] = (ask_qty_1 <= THIN_THRESHOLD).astype(np.int8)
+    # Bid side thin: very little bid volume at L1 (potential exhaustion of buyers)
+    result['exhaustion_bid_thin'] = (bid_qty_1 <= THIN_THRESHOLD).astype(np.int8)
+
+    # Extreme case: one side is zero (unfinished auction)
+    result['exhaustion_ask_zero'] = (ask_qty_1 == 0.0).astype(np.int8)
+    result['exhaustion_bid_zero'] = (bid_qty_1 == 0.0).astype(np.int8)
+
+    # Exhaustion imbalance: how extreme is the L1 ratio?
+    # +1.0 = complete ask dominance (bid exhausted); -1.0 = complete bid dominance (ask exhausted)
+    total_L1 = bid_qty_1 + ask_qty_1
+    result['exhaustion_ratio'] = np.where(
+        total_L1 > 0,
+        np.clip((ask_qty_1 - bid_qty_1) / total_L1, -1.0, 1.0),
+        0.0
+    ).astype(np.float32)
+
+    # === SPATIAL LOB DENSITY (improved — gap detection) ===
+    # Keep existing basic Xi for backward compatibility
+    bid_px_1 = to_float_series(df['bid_px_1']) if 'bid_px_1' in df.columns else to_float_series(df['best_bid'])
+    bid_px_10_val = (df['best_bid'].astype(float) - 9 * TICK_SIZE) if 'bid_px_10' not in df.columns else df['bid_px_10']
+    bid_px_10 = to_float_series(bid_px_10_val)
+    ask_px_1 = to_float_series(df['ask_px_1']) if 'ask_px_1' in df.columns else to_float_series(df['best_ask'])
+    ask_px_10_val = (df['best_ask'].astype(float) + 9 * TICK_SIZE) if 'ask_px_10' not in df.columns else df['ask_px_10']
+    ask_px_10 = to_float_series(ask_px_10_val)
+
+    result['actual_depth_bid_Xi'] = ((bid_px_1 - bid_px_10) / TICK_SIZE).astype(np.float32)
+    result['actual_depth_ask_Xi'] = ((ask_px_10 - ask_px_1) / TICK_SIZE).astype(np.float32)
+
+    # NEW: Gap detection between consecutive populated levels
+    # A "gap" is when price jump between levels > 1 tick (vacuum)
+    bid_px_cols = [f'bid_px_{i}' for i in range(1, 11)]
+    ask_px_cols = [f'ask_px_{i}' for i in range(1, 11)]
+
+    available_bid_px = [c for c in bid_px_cols if c in df.columns]
+    available_ask_px = [c for c in ask_px_cols if c in df.columns]
+
+    if len(available_bid_px) >= 2:
+        bid_px_arr = df[available_bid_px].values.astype(np.float64)
+        bid_px_arr = np.where(np.isnan(bid_px_arr), np.nan, bid_px_arr)
+
+        # Bid prices decrease as level increases, so gaps are px[i] - px[i+1]
+        bid_gaps = bid_px_arr[:, :-1] - bid_px_arr[:, 1:]  # shape [n_rows, n_levels-1]
+        bid_gaps_ticks = bid_gaps / TICK_SIZE
+
+        result['lob_max_gap_bid'] = np.nanmax(bid_gaps_ticks, axis=1).astype(np.float32)
+        result['lob_vacuum_count_bid'] = (bid_gaps_ticks > 2.0).sum(axis=1).astype(np.int8)
+    else:
+        result['lob_max_gap_bid'] = np.float32(0.0)
+        result['lob_vacuum_count_bid'] = np.int8(0)
+
+    if len(available_ask_px) >= 2:
+        ask_px_arr = df[available_ask_px].values.astype(np.float64)
+        ask_px_arr = np.where(np.isnan(ask_px_arr), np.nan, ask_px_arr)
+
+        # Ask prices increase as level increases, so gaps are px[i+1] - px[i]
+        ask_gaps = ask_px_arr[:, 1:] - ask_px_arr[:, :-1]
+        ask_gaps_ticks = ask_gaps / TICK_SIZE
+
+        result['lob_max_gap_ask'] = np.nanmax(ask_gaps_ticks, axis=1).astype(np.float32)
+        result['lob_vacuum_count_ask'] = (ask_gaps_ticks > 2.0).sum(axis=1).astype(np.int8)
+    else:
+        result['lob_max_gap_ask'] = np.float32(0.0)
+        result['lob_vacuum_count_ask'] = np.int8(0)
+
+    # Combined vacuum signal
+    result['lob_vacuum_score'] = (
+        result['lob_vacuum_count_bid'].astype(np.int16) +
+        result['lob_vacuum_count_ask'].astype(np.int16)
+    ).clip(0, 127).astype(np.int8)
 
 
     # === STACK/PULL FEATURES ===
@@ -208,6 +311,30 @@ def compute_features_vectorized(df: pd.DataFrame, prev_df: pd.DataFrame | None) 
         result['flow_cancellation_bid_5']   = pull_bid[:, :5].sum(axis=1)
         result['flow_limit_add_ask_5'] = stack_ask[:, :5].sum(axis=1)
         result['flow_cancellation_ask_5']   = pull_ask[:, :5].sum(axis=1)
+
+    # === CUMULATIVE DELTA PROXY (components for later divergence detection) ===
+    # These are computed per-chunk and output to CSV.
+    # Full divergence detection happens in P3b on the sampled events sequence.
+    # NOTE: Full Cumulative Delta Divergence (price_low + delta_higher_low) is implemented
+    # in phase3b_temporal_features.py (P3b) which processes the CUSUM-sampled sequence
+    # where rolling windows work correctly across the full trading day.
+    if has_trades:
+        # Aggressive buy = market_buy_L1 (taker hitting ask)
+        # Aggressive sell = market_sell_L1 (taker hitting bid)
+        agg_buy = to_float_series(df['traded_vol_ask'])   # ask side traded = aggressive buy
+        agg_sell = to_float_series(df['traded_vol_bid'])  # bid side traded = aggressive sell
+        result['delta_raw'] = (agg_buy - agg_sell).astype(np.float32)
+    else:
+        # Fallback: compute ps_delta_L1 directly from stack/pull numpy arrays
+        result['delta_raw'] = (
+            (stack_bid[:, 0] - pull_bid[:, 0]) - (stack_ask[:, 0] - pull_ask[:, 0])
+        ).astype(np.float32)
+
+    # Cumulative delta within chunk (resets each chunk — P3b will stitch across chunks)
+    result['cum_delta_chunk'] = result['delta_raw'].cumsum().astype(np.float32)
+
+    # Delta sign (useful for sequence pattern detection)
+    result['delta_sign'] = np.sign(result['delta_raw']).astype(np.int8)
 
     # Stack/pull levels 2-5
     for i in range(1, 5):
@@ -291,8 +418,50 @@ def compute_features_vectorized(df: pd.DataFrame, prev_df: pd.DataFrame | None) 
         'flow_limit_add_bid_L1', 'flow_cancellation_bid_L1', 'flow_market_sell_L1',
         'flow_limit_add_ask_L1', 'flow_cancellation_ask_L1', 'flow_market_buy_L1',
         'flow_limit_add_bid_5', 'flow_cancellation_bid_5',
-        'flow_limit_add_ask_5', 'flow_cancellation_ask_5'
+        'flow_limit_add_ask_5', 'flow_cancellation_ask_5',
+        # NEW order flow features
+        'delta_raw', 'cum_delta_chunk', 'delta_sign',
+        # Diagonal Stacked Imbalances
+        'stacked_imb_ask', 'stacked_imb_bid', 'stacked_imb_score',
+        'stacked_imb_flag_ask', 'stacked_imb_flag_bid',
+        # Exhaustion / Thin Prints
+        'exhaustion_ask_thin', 'exhaustion_bid_thin',
+        'exhaustion_ask_zero', 'exhaustion_bid_zero', 'exhaustion_ratio',
+        # LOB Spatial Density (improved)
+        'lob_max_gap_bid', 'lob_max_gap_ask',
+        'lob_vacuum_count_bid', 'lob_vacuum_count_ask', 'lob_vacuum_score',
     ]
+
+    # === MEMORY DOWNCAST (float64 → float32, flags → int8) ===
+    # Saves ~40% RAM on output columns
+    float32_cols = [
+        'spread_ticks', 'microprice', 'mid_price_diff',
+        'imbalance_1', 'imbalance_5', 'imbalance_10',
+        'bid_depth_5', 'ask_depth_5', 'depth_ratio',
+        'bid_qty_1', 'ask_qty_1',
+        'ps_weighted_bid', 'ps_weighted_ask', 'ps_net_weighted', 'ps_delta_L1',
+        'actual_depth_bid_Xi', 'actual_depth_ask_Xi',
+        'lob_max_gap_bid', 'lob_max_gap_ask',
+        'exhaustion_ratio', 'delta_raw', 'cum_delta_chunk',
+        'flow_limit_add_bid_L1', 'flow_cancellation_bid_L1', 'flow_market_sell_L1',
+        'flow_limit_add_ask_L1', 'flow_cancellation_ask_L1', 'flow_market_buy_L1',
+        'flow_limit_add_bid_5', 'flow_cancellation_bid_5',
+        'flow_limit_add_ask_5', 'flow_cancellation_ask_5',
+    ]
+    int8_cols = [
+        'stacked_imb_ask', 'stacked_imb_bid', 'stacked_imb_score',
+        'stacked_imb_flag_ask', 'stacked_imb_flag_bid',
+        'exhaustion_ask_thin', 'exhaustion_bid_thin',
+        'exhaustion_ask_zero', 'exhaustion_bid_zero',
+        'delta_sign', 'lob_vacuum_count_bid', 'lob_vacuum_count_ask',
+        'lob_vacuum_score',
+    ]
+    for c in float32_cols:
+        if c in result.columns:
+            result[c] = result[c].astype(np.float32)
+    for c in int8_cols:
+        if c in result.columns:
+            result[c] = result[c].astype(np.int8)
 
     return result[output_cols]
 
@@ -335,7 +504,18 @@ def compute_features_chunked(
         'flow_limit_add_bid_L1', 'flow_cancellation_bid_L1', 'flow_market_sell_L1',
         'flow_limit_add_ask_L1', 'flow_cancellation_ask_L1', 'flow_market_buy_L1',
         'flow_limit_add_bid_5', 'flow_cancellation_bid_5',
-        'flow_limit_add_ask_5', 'flow_cancellation_ask_5'
+        'flow_limit_add_ask_5', 'flow_cancellation_ask_5',
+        # NEW order flow features
+        'delta_raw', 'cum_delta_chunk', 'delta_sign',
+        # Diagonal Stacked Imbalances
+        'stacked_imb_ask', 'stacked_imb_bid', 'stacked_imb_score',
+        'stacked_imb_flag_ask', 'stacked_imb_flag_bid',
+        # Exhaustion / Thin Prints
+        'exhaustion_ask_thin', 'exhaustion_bid_thin',
+        'exhaustion_ask_zero', 'exhaustion_bid_zero', 'exhaustion_ratio',
+        # LOB Spatial Density (improved)
+        'lob_max_gap_bid', 'lob_max_gap_ask',
+        'lob_vacuum_count_bid', 'lob_vacuum_count_ask', 'lob_vacuum_score',
     ]
 
     temp_dir = Path(output_path).parent
@@ -406,3 +586,64 @@ def print_report(stats: dict[str, Any]) -> None:
     print("\n" + "=" * 60)
     print("Phase 3 completed.")
     print("=" * 60 + "\n")
+
+
+if __name__ == "__main__":
+    # Synthetic test - 1000 rows
+    import numpy as np
+    import pandas as pd
+
+    n = 1000
+    np.random.seed(42)
+    base_price = 19000.0
+
+    test_df = pd.DataFrame({
+        'ts': range(n),
+        'best_bid': base_price + np.random.randn(n) * 0.5,
+        'best_ask': base_price + 0.25 + np.random.randn(n) * 0.5,
+        'spread': [0.25] * n,
+        'mid_price': base_price + np.random.randn(n) * 0.5,
+        **{f'bid_qty_{i}': np.random.randint(1, 50, n).astype(float) for i in range(1, 11)},
+        **{f'ask_qty_{i}': np.random.randint(1, 50, n).astype(float) for i in range(1, 11)},
+        **{f'bid_px_{i}': base_price - (i-1)*0.25 + np.random.randn(n)*0.01 for i in range(1, 11)},
+        **{f'ask_px_{i}': base_price + 0.25 + (i-1)*0.25 + np.random.randn(n)*0.01 for i in range(1, 11)},
+    })
+
+    # Force a few rows with stacked imbalances for testing
+    test_df.loc[100:105, [f'ask_qty_{i}' for i in range(1, 6)]] = 150.0
+    test_df.loc[100:105, [f'bid_qty_{i}' for i in range(1, 6)]] = 5.0
+
+    result = compute_features_vectorized(test_df, None)
+
+    print("=== P3 NEW FEATURES VALIDATION ===")
+    print(f"Output columns: {len(result.columns)}")
+    print(f"Output shape: {result.shape}")
+    print()
+
+    # Check stacked imbalances
+    print("STACKED IMBALANCES (rows 98-108):")
+    print(result[['stacked_imb_ask','stacked_imb_bid','stacked_imb_score','stacked_imb_flag_ask']].iloc[98:108])
+
+    # Check exhaustion
+    print("\nEXHAUSTION (first 5 rows):")
+    print(result[['exhaustion_ask_thin','exhaustion_bid_thin','exhaustion_ratio']].head())
+
+    # Check vacuum
+    print("\nLOB VACUUM (first 5 rows):")
+    print(result[['lob_max_gap_bid','lob_max_gap_ask','lob_vacuum_score']].head())
+
+    # Check delta
+    print("\nDELTA (first 5 rows):")
+    print(result[['delta_raw','cum_delta_chunk','delta_sign']].head())
+
+    # Check dtypes
+    print("\nDTYPES:")
+    for col in ['stacked_imb_score', 'exhaustion_ratio', 'lob_max_gap_bid', 'delta_raw']:
+        if col in result.columns:
+            print(f"  {col}: {result[col].dtype}")
+
+    # Validate stacked detection worked on forced rows
+    assert result['stacked_imb_flag_ask'].iloc[100] == 1, "FAIL: stacked_imb_flag_ask not triggered"
+    assert result['stacked_imb_flag_bid'].iloc[100] == 0, "FAIL: bid flag should be 0"
+    print("\n[OK] All assertions passed - P3 new features validated")
+    print("Run: python vps_feature_engineering_vectorized.py")

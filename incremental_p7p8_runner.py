@@ -7,9 +7,9 @@ Runs missing P7 candidates (phase7_labeling.py) then P8 (phase8_entry_model.py).
 Idempotent via per-phase sentinel files. Supports --workers for parallelism.
 
 USAGE
-    python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --workers 4
-    python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --dry-run
-    python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --force
+    python3 NQdom/incremental_p7p8_runner.py --output-dir NQdom/output --workers 4
+    python3 NQdom/incremental_p7p8_runner.py --output-dir NQdom/output --dry-run
+    python3 NQdom/incremental_p7p8_runner.py --output-dir NQdom/output --force
 """
 
 import argparse
@@ -26,7 +26,11 @@ from pathlib import Path
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-VPS_BASE = "/opt/depth-dom"
+# ── Auto-detect local paths ─────────────────────────────────────────────────────
+SCRIPT_DIR = Path(__file__).parent.resolve()
+REPO_ROOT = SCRIPT_DIR.parent
+VPS_BASE = str(REPO_ROOT)  # used as cwd for subprocess
+
 PHASE_NAMES = [
     "p1_parse", "p2_reconstruct", "p3_features", "p4_agg",
     "p5_sample", "p6_excursion",
@@ -358,7 +362,7 @@ def discover_eligible_days(output_dir: Path) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(description="Incremental P7+P8 runner")
-    parser.add_argument("--output-dir", default=VPS_BASE + "/output",
+    parser.add_argument("--output-dir", default=str(REPO_ROOT / "output"),
                         help="Path to output directory")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of parallel workers (days)")

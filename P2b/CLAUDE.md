@@ -29,12 +29,6 @@
 |----|------|---|-------|------|
 | #3689 | 4:50 PM | 🔵 | Deep LOB Notebook Architecture Context Discovered | ~286 |
 | #3604 | 3:18 PM | 🔴 | P4 streaming CSV fix eliminates OOM on 8.4M-row dataset | ~396 |
-
-### Apr 12, 2026
-
-| ID | Time | T | Title | Read |
-|----|------|---|-------|------|
-| #4080 | " | 🔴 | P2b Sierra Chart CSV leading spaces bug identified and fixed | ~350 |
 </claude-mem-context>
 
 ## Script

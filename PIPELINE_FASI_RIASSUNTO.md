@@ -1,17 +1,17 @@
 # DEPTH-DOM Pipeline — Riepilogo Fasi
 
-**Data:** 2026-04-12
+**Data:** 2026-04-13
 **Pipeline:** 12 fasi per la generazione di segnali di trading ML-ready
 **Input:** File `.depth` binari Sierra Chart (NQ futures)
 **Output:** Modelli ML + bridge live per esecuzione in Sierra Chart
-**Riferimento architetturale:** Deep LOB NotebookLM (NotebookLM, 288 sources)
+**Esecuzione:** LOCAL — nessun VPS richiesto
 
 ---
 
 ## Struttura Directory
 
 ```
-DEPTH DOM VPS/
+NQdom/
 │
 ├── CLAUDE.md                     ← istruzioni progetto per Claude Code
 ├── PIPELINE_FASI_RIASSUNTO.md   ← questo file
@@ -31,23 +31,21 @@ DEPTH DOM VPS/
 ├── P12/  vps_phase12_sierra_bridge.py, README.md
 │
 ├── SHARED/
-│   ├── _pipeline_constants.py     ← costanti condivise (CANDIDATES, ALL_FEATURE_PATTERNS, helpers)
+│   ├── _pipeline_constants.py     ← costanti condivise
 │   └── README.md
 │
 ├── ORCHESTRATOR/
-│   ├── vps_multiday_runner.py    ← batch orchestrator P1-P8 (full)
-│   ├── incremental_p7p8_runner.py ← runner P7/P8 incrementale
-│   ├── aggregate_results.py        ← aggregazione risultati
-│   ├── plot_dashboard.py         ← dashboard plotting
-│   ├── audit_pipeline.py          ← audit pipeline
-│   ├── status_live.py             ← status live
-│   ├── vps_watchdog.sh           ← watchdog
-│   ├── cron_orchestrator.sh       ← cron 30-min orchestrator
-│   └── README.md
+│   ├── run_p1_to_p7_multiday.py   ← batch orchestrator P1-P7 (LOCAL)
+│   ├── incremental_p7p8_runner.py ← runner P7/P8 incrementale (LOCAL)
+│   ├── aggregate_results.py        ← aggregazione risultati (LOCAL)
+│   ├── plot_dashboard.py           ← dashboard plotting
+│   ├── audit_pipeline.py           ← audit pipeline
+│   ├── audit_p7_results.py         ← P5-P7 data quality audit
+│   └── status_live.py              ← status live
 │
 ├── INPUT/                        ← .depth source files
-│
-├── VPS: /opt/depth-dom/  ← pipeline completo, flat
+├── INPUT_TS/                     ← Sierra Chart Time & Sales
+└── output/                        ← output per giorno
 ```
 
 ---
@@ -79,9 +77,6 @@ DEPTH DOM VPS/
   │
   ▼ P12 ─► Bridge TCP ──► Sierra Chart   (live service)
 ```
-
-**Hardware VPS:** Contabo Cloud VPS 30 SSD — 8 core, 24GB RAM, 400GB SSD
-**VPS:** `root@185.185.82.205` — codice in `/opt/depth-dom/`
 
 ---
 
@@ -128,10 +123,10 @@ Riferimento: NotebookLM "Deep Limit Order Book Forecasting and Market Microstruc
 
 ## Fase 1 — Parsing Binario
 
-**Script:** `vps_depth_parser.py` (optimized) / `PHASE_1_3/vps_depth_parser.py`
+**Script:** `P1/depth_parser.py`
 
-**Input:** `/opt/depth-dom/input/NQ*/YYYY-MM-DD.depth` (formato Sierra Chart proprietario)
-**Output:** `events.csv`
+**Input:** `NQdom/INPUT/NQ*/YYYY-MM-DD.depth` (formato Sierra Chart proprietario)
+**Output:** `NQdom/output/{date}/events.csv`
 
 ### Formato File .depth (reverse-engineered)
 
@@ -177,7 +172,7 @@ Record (24 byte):
 
 ## Fase 2 — Ricostruzione Order Book
 
-**Script:** `OPTIMIZATIONS/vps_book_reconstructor.py`
+**Script:** `P2/vps_book_reconstructor.py`
 
 **Input:** `events.csv`
 **Output:** `snapshots.csv`
@@ -244,7 +239,7 @@ Quando `bid_qty_1` scende, non sappiamo se è:
 
 ## Fase 3 — Feature Engineering Vettorializzata
 
-**Script:** `OPTIMIZATIONS/vps_feature_engineering_vectorized.py`
+**Script:** `P3/vps_feature_engineering_vectorized.py`
 
 **Input:** `snapshots.csv` o `snapshots_fused.csv` (se P2b completato)
 **Output:** `features_dom.csv` (~310 MB/giorno)
@@ -305,7 +300,7 @@ Dopo la fusione con T&S, le seguenti feature vengono calcolate:
 
 ## Fase 4 — Aggregazione Rolling Window
 
-**Script:** `OPTIMIZATIONS/vps_feature_engineering_agg.py`
+**Script:** `P4/vps_feature_engineering_agg.py`
 
 **Input:** `features_dom.csv`
 **Output:** `features_dom_agg.csv`
@@ -347,7 +342,7 @@ def get(self):
 
 ## Fase 5 — CUSUM Sampling
 
-**Script:** `OPTIMIZATIONS/vps_cusum_sampler.py`
+**Script:** `P5/vps_cusum_sampler.py`
 
 **Input:** `features_dom.csv` + `features_dom_agg.csv`
 **Output:** `sampled_events.csv` (~1% degli eventi originali, ~31 MB/giorno)
@@ -376,7 +371,7 @@ Pass 2: Accumula Δmid_price in CUSUM S
 
 ## Fase 6 — Analisi Escursioni
 
-**Script:** `OPTIMIZATIONS/vps_excursion_analysis_vectorized.py`
+**Script:** `P6/vps_excursion_analysis_vectorized.py`
 
 **Input:** `snapshots.csv` + `sampled_events.csv`
 **Output:** `excursion_stats.csv`
@@ -404,7 +399,7 @@ mfe_60s = running_max[idx_60s] - ref_price
 mfe_120s = running_max[idx_120s] - ref_price
 ```
 
-**Memory management:** Chunked processing (2M snapshot rows, 500K event rows per chunk) — peak ~1.5GB su 24GB VPS.
+**Memory management:** Chunked processing (2M snapshot rows, 500K event rows per chunk) — peak ~1.5GB.
 
 **Checkpoint:** `_checkpoints/p6_excursion.done`
 
@@ -537,7 +532,7 @@ P_T = (PT + TT - CT) / CT
 
 ## Fase 11 — RL Trade Execution
 
-**Script:** `OPTIMIZATIONS/vps_phase11_rl_execution.py`
+**Script:** `P11/vps_phase11_rl_execution.py`
 
 **Tipo:** Live service (non batch)
 
@@ -571,7 +566,7 @@ log P(a) = log N(z|μ, σ) − Σlog(aₖ)  # change of variables
 
 ## Fase 12 — Sierra Chart Live Bridge
 
-**Script:** `OPTIMIZATIONS/vps_phase12_sierra_bridge.py`
+**Script:** `P12/vps_phase12_sierra_bridge.py`
 
 **Tipo:** Live service (non batch)
 
@@ -616,43 +611,19 @@ Chiama direttamente `sc.BuyEntry`, `sc.SellEntry`, `sc.Flatten` — **nessuno sp
 P1 → P2 → P2b → P3 → P4 → P5 → P6 → P7 (×3 candidati) → P8
 ```
 
-### run_p1_to_p7_multiday.py (NUOVO — Apr 2026)
+### run_p1_to_p7_multiday.py (LOCAL)
 
 Orchestrator dedicato per P1→P7 (con P2b incluso). Cerca automaticamente `trades.txt/csv` accanto al `.depth` file per ogni giorno. Se trades assente per un giorno, P2b skippa con warning e il pipeline continua.
 
 ```bash
 # Dry run
-python3 run_p1_to_p7_multiday.py --dry-run
+python3 NQdom/run_p1_to_p7_multiday.py --dry-run
 
 # Resume (skip giorni con P7 già completo)
-python3 run_p1_to_p7_multiday.py --resume --workers 1
+python3 NQdom/run_p1_to_p7_multiday.py --resume --workers 1
 
 # Forza re-run completo
-python3 run_p1_to_p7_multiday.py --force --max-days 3
-
-# Sequential (RAM-safe)
-python3 run_p1_to_p7_multiday.py --resume --workers 1
-```
-
-**Target single day:** NON esiste `--days` nel multiday runner. Per targettare un giorno specifico usare direttamente:
-```bash
-python3 P1/main.py --days 2026-03-13 --force
-```
-Questo lancia P1→P6 inline per quel giorno (P2b viene chiamato automaticamente da P1/main.py).
-
-### vps_multiday_runner.py
-
-Coordina P1-P8 su tutti i giorni (full pipeline).
-
-```bash
-# Full run
-python3 vps_multiday_runner.py --workers 4 --force
-
-# P1-P6 solo
-python3 vps_multiday_runner.py --workers 4 --skip-p7-p8 --force
-
-# Resume (skip già completati)
-python3 vps_multiday_runner.py --workers 4 --resume
+python3 NQdom/run_p1_to_p7_multiday.py --force --max-days 3
 ```
 
 ### incremental_p7p8_runner.py
@@ -660,15 +631,8 @@ python3 vps_multiday_runner.py --workers 4 --resume
 Esegue P7+P8 per giorni con P1-P6 completo ma P7/P8 mancante.
 
 ```bash
-python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --workers 4
+python3 NQdom/incremental_p7p8_runner.py --output-dir NQdom/output --workers 4
 ```
-
-### cron_orchestrator.sh
-
-Runs ogni 30 min via cron:
-1. incremental_p7p8_runner
-2. aggregate_results
-3. plot_dashboard
 
 ---
 
@@ -677,7 +641,7 @@ Runs ogni 30 min via cron:
 Ogni fase produce un sentinel file in `_checkpoints/`:
 
 ```
-output/{date}/_checkpoints/
+NQdom/output/{date}/_checkpoints/
   p1_parse.done
   p2_reconstruct.done
   p2b_fusion.done        ← NUOVO (Apr 2026)
@@ -696,48 +660,33 @@ time=2026-04-10T18:30:00
 error=   # opzionale, se failed
 ```
 
-**Manifest:** `/opt/depth-dom/output/_multiday_manifest.csv` e `_p1p7_manifest.csv`
+**Manifest:** `NQdom/output/_p1p7_manifest.csv`
 
 ---
 
-## Directory Structure su VPS
+## Directory Structure Locale
 
 ```
-/opt/depth-dom/
-├── vps_depth_parser.py              # P1
-├── book_reconstructor.py              # P2
-├── vps_phase2b_data_fusion.py       # P2b
-├── vps_feature_engineering_vectorized.py  # P3
-├── vps_feature_engineering_agg.py    # P4
-├── vps_cusum_sampler.py              # P5
-├── vps_excursion_analysis_vectorized.py  # P6
-├── vps_phase7_labeling.py            # P7
-├── vps_phase8_entry_model.py         # P8
-├── vps_phase11_rl_execution.py        # P11
-├── vps_phase12_sierra_bridge.py       # P12
-├── vps_multiday_runner.py             # Orchestrator batch
-├── incremental_p7p8_runner.py         # Orchestrator incremental
-├── run_p1_to_p7_multiday.py          # Orchestrator P1-P7 (nuovo)
-├── _pipeline_constants.py              # Costanti condivise
-├── main.py                            # CLI single-day
-├── input/NQ*/YYYY-MM-DD.depth         # Source data
+NQdom/
+├── INPUT/                        ← .depth source files
+├── INPUT_TS/                     ← Sierra Chart Time & Sales (.txt)
+│   └── by_day/                  ← split trades per day
 └── output/
-    ├── _multiday_manifest.csv
-    ├── _p1p7_manifest.csv              ← NUOVO
+    ├── _p1p7_manifest.csv
     └── {YYYY-MM-DD}/
         ├── events.csv                  # P1
         ├── snapshots.csv               # P2
         ├── snapshots_fused.csv         # P2b (se T&S disponibile)
         ├── features_dom.csv            # P3
-        ├── features_dom_agg.csv       # P4
+        ├── features_dom_agg.csv        # P4
         ├── sampled_events.csv          # P5
         ├── excursion_stats.csv         # P6
-        ├── phase7_labels_*/          # P7 (3 directory candidati)
+        ├── phase7_labels_*/           # P7 (3 directory candidati)
         │   ├── phase7_labels_2000ticks_10p0_10p0/
         │   ├── phase7_labels_4000ticks_20p0_20p0/
         │   └── phase7_labels_8000ticks_40p0_40p0/
-        ├── _checkpoints/              # Sentinel files
-        └── model.pkl                  # P8
+        ├── _checkpoints/               # Sentinel files
+        └── model.pkl                   # P8
 ```
 
 ---
@@ -800,6 +749,3 @@ COST_BP_ES = 2               # ~$10 round-turn ES
 
 - NotebookLM: "Deep Limit Order Book Forecasting and Market Microstructure Analysis" (ID: 077fed0a, 288 sources)
 - Pipeline completo: `DEPTH-DOM-PIPELINE-DOCUMENTATION.md`
-- VPS access: `root@185.185.82.205` (primary), `root@96.30.209.74` (secondary)
-- Log pipeline: `/opt/depth-dom/pipeline_full3.log`
-- Log cron: `/opt/depth-dom/logs/cron_orchestrator.log`

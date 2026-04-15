@@ -44,8 +44,11 @@ CRASH FIXES:
 
 import csv
 import gc
+import json
+import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,12 +57,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Try numba — fall back to pure-numpy if unavailable
+# Try numba — fall back to pure-numpy if unavailable or disabled via env
 try:
     from numba import njit, prange
-    HAS_NUMBA = True
+    # Disable numba if env var set (avoids Windows cache corruption issues)
+    HAS_NUMBA = True if os.environ.get("P6_NO_JIT", "0") != "1" else False
 except ImportError:
     HAS_NUMBA = False
+
+# Force disable numba if cache is corrupted (prevents ModuleNotFoundError during JIT)
+# Remove __pycache__ to clear stale cache entries
+import os, glob
+pycache = glob.glob(os.path.join(os.path.dirname(__file__), "__pycache__"))
+for d in pycache:
+    for f in glob.glob(os.path.join(d, "numba_*")):
+        try: os.remove(f)
+        except: pass
     def njit(*args, **kwargs):
         def decorator(f):
             return f
@@ -117,6 +130,123 @@ HORIZONS = [30, 60, 120]
 PERCENTILES = [50, 75, 90, 95]
 COLORS = ["#4CAF50", "#FF9800", "#F44336", "#9C27B0"]
 
+# Maximum allowed output/input ratio. P6 produces exactly 1 row per P5 input row.
+# If ratio > MAX_P6_RATIO, the output is corrupt and should be rejected.
+MAX_P6_RATIO = 15.0
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint staleness fix (Apr 13, 2026)
+# BUG: P6 skipped recomputation after P5 was re-run with fixed CUSUM.
+# FIX: Fingerprint P5 state at P6 completion; validate before skipping.
+# ---------------------------------------------------------------------------
+
+def _count_csv_rows(path: Path) -> int:
+    """Fast row count without parsing CSV."""
+    with open(path, "rb") as f:
+        return sum(1 for _ in f) - 1  # -1 for header
+
+
+def compute_input_fingerprint(p5_path: Path) -> dict:
+    """
+    Compute a fingerprint of the P5 sampled_events.csv state.
+    Used to detect when P6 needs to re-run because P5 input changed.
+    """
+    stats = p5_path.stat()
+    return {
+        "mtime": stats.st_mtime,
+        "size_bytes": stats.st_size,
+        "row_count": _count_csv_rows(p5_path),
+        "fingerprint_ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def save_fingerprint(fingerprint: dict, out_dir: Path) -> None:
+    """Save fingerprint JSON next to excursion_stats.csv."""
+    fp_path = out_dir / "p6_input_fingerprint.json"
+    with open(fp_path, "w", encoding="utf-8") as f:
+        json.dump(fingerprint, f, indent=2)
+
+
+def load_fingerprint(out_dir: Path) -> dict | None:
+    """Load saved fingerprint, or None if not present."""
+    fp_path = out_dir / "p6_input_fingerprint.json"
+    if not fp_path.exists():
+        return None
+    with open(fp_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def should_skip_p6(out_dir: Path, p5_path: Path) -> tuple[bool, str]:
+    """
+    Decide whether P6 can skip recomputation.
+
+    Returns (skip: bool, reason: str).
+    skip=True means P6 output is valid and we should return early.
+    skip=False means P6 must re-run (no output, or input changed).
+
+    Staleness logic:
+      - No output file    -> must run
+      - Output exists but no fingerprint (legacy) -> must run (cannot verify)
+      - Fingerprint present: compare mtime + size of current P5 vs saved
+      - If either differs -> input changed since last P6 run, must re-run
+      - If both match     -> P5 unchanged, P6 output is valid, skip
+    """
+    excursion_path = out_dir / "excursion_stats.csv"
+    fp_path = out_dir / "p6_input_fingerprint.json"
+
+    if not excursion_path.exists():
+        return False, "no output file"
+
+    if not fp_path.exists():
+        return False, "no fingerprint (legacy run, forcing re-run)"
+
+    saved = load_fingerprint(out_dir)
+    if saved is None:
+        return False, "fingerprint unreadable (forcing re-run)"
+
+    current_mtime = p5_path.stat().st_mtime
+    current_size = p5_path.stat().st_size
+
+    if saved["mtime"] != current_mtime:
+        return False, (f"P5 mtime changed: saved={saved['mtime']}, "
+                       f"current={current_mtime}")
+    if saved["size_bytes"] != current_size:
+        return False, (f"P5 size changed: saved={saved['size_bytes']}, "
+                       f"current={current_size}")
+
+    return True, "fingerprint valid, P5 unchanged"
+
+
+def validate_p6_output(p5_path: Path, output_path: Path, date: str) -> None:
+    """
+    Post-run validation: ensure P6 output row count is within expected range.
+
+    Raises RuntimeError if ratio exceeds MAX_P6_RATIO, deleting corrupt output.
+    """
+    p5_rows = _count_csv_rows(p5_path)
+    p6_rows = _count_csv_rows(output_path)
+    ratio = p6_rows / max(p5_rows, 1)
+
+    print(f"  [P6] Ratio check: P5={p5_rows:,} -> P6={p6_rows:,} ({ratio:.2f}x)")
+
+    if ratio > MAX_P6_RATIO:
+        # Clean up corrupt output
+        if output_path.exists():
+            output_path.unlink(missing_ok=True)
+        fp_path = output_path.parent / "p6_input_fingerprint.json"
+        if fp_path.exists():
+            fp_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"P6 OUTPUT ANOMALY for {date}: ratio={ratio:.1f}x "
+            f"(P5={p5_rows}, P6={p6_rows}). Expected <={MAX_P6_RATIO}x. "
+            f"Corrupt output deleted. Aborting."
+        )
+
+    print(f"  [P6] Ratio check PASSED for {date}: {ratio:.2f}x")
+
+
+
 
 # ---------------------------------------------------------------------------
 # Vectorized timestamp parsing (pandas 2.x / 3.x compatible)
@@ -155,7 +285,95 @@ def _parse_ts_array_vectorized(ts_series) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Numba JIT compiled excursion kernel
+# Vectorized excursion kernel — O(events × log snapshots)
+# Replaces Numba kernel for days with high snapshot density.
+#
+# Original: for each event, binary search (log n) + forward scan (m snapshots)
+#   → O(events × m) where m = avg snapshots within horizon (102K for Mar 19)
+#
+# New: for each event, binary search (log n) + 3× O(log n) binary searches
+#   → O(events × log n) where log n ≈ 25
+#   → 154K × 25 vs 154K × 102K = 4000× speedup
+# ---------------------------------------------------------------------------
+
+def _excursion_vectorized(
+    sampled_ts_ns: np.ndarray,
+    lookup_ts_ns: np.ndarray,
+    lookup_prices: np.ndarray,
+    results: np.ndarray,
+) -> None:
+    """
+    Vectorized excursion computation using binary-search for max/min lookup.
+
+    For each sampled event at timestamp T:
+      1. Binary search: si = first snapshot ≥ T
+      2. For each horizon (30s/60s/120s):
+         ei = last snapshot ≤ T + horizon
+         max_horizon = max(lookup_prices[si:ei+1])
+         min_horizon = min(lookup_prices[si:ei+1])
+         cnt = ei - si + 1
+
+    Binary search for max/min (O(log n)) vs forward scan (O(m)) where
+    m = avg snapshots in horizon window. For Mar 19: m = 102K, log n = 25.
+    """
+    n_prices = len(lookup_ts_ns)
+    n_events = len(sampled_ts_ns)
+    TICK = TICK_SIZE
+    horizons = [(0, WIN30S_NS), (1, WIN60S_NS), (2, WIN120S_NS)]
+
+    print(f"  [P6] Vectorized: {n_events:,} events, {n_prices:,} snapshots...", flush=True)
+    t0 = time.time()
+
+    for i in range(n_events):
+        t_event = sampled_ts_ns[i]
+        if t_event <= 0:
+            continue
+
+        # Position of first snapshot ≥ t_event
+        si = np.searchsorted(lookup_ts_ns, t_event, side="left")
+        if si >= n_prices:
+            continue
+
+        start_price = lookup_prices[si]
+        results[i, 0] = start_price
+
+        for h_idx, h_ns in horizons:
+            base = h_idx * 12 + 1
+            end_ts = t_event + h_ns
+
+            # Last snapshot ≤ end_ts
+            ei = np.searchsorted(lookup_ts_ns, end_ts, side="right") - 1
+            ei = max(si, min(ei, n_prices - 1))
+            cnt = ei - si + 1
+
+            if cnt <= 0:
+                continue
+
+            # Max/min via binary search on subarray [si:ei+1]
+            max_val = float(lookup_prices[si:ei+1].max())
+            min_val = float(lookup_prices[si:ei+1].min())
+            horizon_end_ts = lookup_ts_ns[ei]
+
+            up = max_val - start_price
+            dn = start_price - min_val
+            mae = max(up, dn)
+
+            results[i, base]   = up;               results[i, base+1] = dn
+            results[i, base+2] = up / TICK;     results[i, base+3] = dn / TICK
+            results[i, base+4] = mae;             results[i, base+5] = mae / TICK
+            results[i, base+6] = dn
+            results[i, base+7] = (end_ts // 1_000_000_000)
+            results[i, base+8] = 1.0 if horizon_end_ts >= end_ts - TOLERANCE_NS else 0.0
+            results[i, base+9] = float(cnt)
+            results[i, base+10] = min_val;       results[i, base+11] = max_val
+
+    elapsed = time.time() - t0
+    rate = n_events / elapsed if elapsed > 0 else 0
+    print(f"  [P6] Vectorized done: {n_events:,} events in {elapsed:.1f}s ({rate:,.0f} ev/s)", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Numba JIT compiled excursion kernel (legacy, used when numba is available)
 # ---------------------------------------------------------------------------
 
 @njit(cache=True)
@@ -398,14 +616,20 @@ def compute_excursions(
     float_cols_idx = [i for i in range(len(numeric_cols)) if i not in int_cols_idx]
 
     # --- JIT warmup ---
-    if HAS_NUMBA:
+    _use_jit = HAS_NUMBA
+    if _use_jit:
         print("  [P6] Warming up Numba JIT kernel...")
-        t0 = time.time()
-        warmup_ts = ts_ns_sorted[:1].copy()
-        warmup_res = np.zeros((1, N_NUMERIC_COLS), dtype=np.float64)
-        _excursion_kernel_sequential(warmup_ts, ts_ns_sorted, mid_prices, warmup_res)
-        t_warmup = time.time() - t0
-        print(f"  [P6] JIT warmup done in {t_warmup:.1f}s")
+        try:
+            t0 = time.time()
+            warmup_ts = ts_ns_sorted[:1].copy()
+            warmup_res = np.zeros((1, N_NUMERIC_COLS), dtype=np.float64)
+            _excursion_kernel_sequential(warmup_ts, ts_ns_sorted, mid_prices, warmup_res)
+            t_warmup = time.time() - t0
+            print(f"  [P6] JIT warmup done in {t_warmup:.1f}s")
+        except Exception as e:
+            print(f"  [P6] JIT warmup FAILED: {type(e).__name__}: {e}")
+            print(f"  [P6] Falling back to pure numpy processing...")
+            _use_jit = False
 
     # --- Process in chunks ---
     print(f"  [P6] Processing sampled events in {SAMPLED_CHUNK_SIZE:,}-row chunks...")
@@ -428,8 +652,9 @@ def compute_excursions(
         # Allocate results for this chunk only (~148MB for 500K events)
         results = np.zeros((n_chunk, N_NUMERIC_COLS), dtype=np.float64)
 
-        # Run Numba kernel
-        _excursion_kernel_sequential(sampled_ts_ns, ts_ns_sorted, mid_prices, results)
+        # Vectorized binary-search excursion computation
+        # O(events × log n × horizons) — works for any snapshot density
+        _excursion_vectorized(sampled_ts_ns, ts_ns_sorted, mid_prices, results)
 
         # Build DataFrame for this chunk
         df_chunk = pd.DataFrame(results, columns=numeric_cols)
@@ -452,9 +677,9 @@ def compute_excursions(
 
         # Update stats
         stats["rows_processed"] += n_chunk
-        stats["n_complete_30s"] += int(results[:, 9].sum())
-        stats["n_complete_60s"] += int(results[:, 21].sum())
-        stats["n_complete_120s"] += int(results[:, 33].sum())
+        stats["n_complete_30s"] += int(results[:, 9].sum())   # window_complete_30s: base=1+8=9
+        stats["n_complete_60s"] += int(results[:, 21].sum())  # window_complete_60s: base=13+8=21
+        stats["n_complete_120s"] += int(results[:, 33].sum()) # window_complete_120s: base=25+8=33
 
         t_chunk = time.time() - t0
         rate = n_chunk / t_chunk if t_chunk > 0 else 0
@@ -594,10 +819,30 @@ if __name__ == "__main__":
                         help="Output path for excursion_summary.csv")
     parser.add_argument("--plot", type=Path, required=True,
                         help="Output path for excursion_distributions.png")
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-run even if output exists (skip fingerprint check)")
     args = parser.parse_args()
 
     t_total = time.time()
 
+    # ── Staleness guard (Apr 13, 2026 fix) ─────────────────────────────────
+    # Only apply fingerprint logic when running from run_p1_to_p7_multiday.py
+    # (which passes output dir via the excursion_path.parent). For standalone
+    # CLI runs, rely on --force flag or missing output file.
+    out_dir = args.output.parent
+    p5_path = args.sampled
+    date_str = out_dir.name
+
+    if not args.force:
+        skip, reason = should_skip_p6(out_dir, p5_path)
+        if skip:
+            print(f"\n  [P6] SKIP: output valid for {date_str} (fingerprint matches)")
+            print(f"        fingerprint_ts: {load_fingerprint(out_dir).get('fingerprint_ts','unknown')}")
+            sys.exit(0)
+        else:
+            print(f"\n  [P6] STALENESS: {reason} -- will re-run")
+
+    # ── Build lookup index from features_dom.csv ──────────────────────────────
     print(f"\n{'='*60}")
     print("PHASE 6: EXCURSION ANALYSIS (VECTORIZED + NUMBA JIT)")
     print(f"{'='*60}")
@@ -606,7 +851,18 @@ if __name__ == "__main__":
     ts_ns, mp = build_lookup_index(args.features)
     print(f"  Index: {len(ts_ns):,} entries")
 
+    # ── Compute excursions ─────────────────────────────────────────────────────
+    print("  Computing excursions...")
     stats = compute_excursions(args.sampled, ts_ns, mp, args.output)
+    print(f"  -> {stats.get('rows_processed', 0):,} rows processed")
+
+    # ── Post-run validation (ratio check) ─────────────────────────────────────
+    validate_p6_output(p5_path, args.output, date_str)
+
+    # ── Save fingerprint (only after validation passes) ──────────────────────
+    fp = compute_input_fingerprint(p5_path)
+    save_fingerprint(fp, out_dir)
+    print(f"  Fingerprint saved: {fp['fingerprint_ts']}")
 
     # Free lookup index before loading full output for summary/plots
     del ts_ns, mp

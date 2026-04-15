@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-aggregate_results.py — Multi-Day P8 Results & Excursion Aggregator
-===================================================================
+aggregate_results.py — Multi-Day P8 Results & Excursion Aggregator (LOCAL)
+=========================================================================
 Scans all days where P8 is complete, reads phase8_trainval_results.csv,
 and produces aggregate CSVs + a human-readable summary.
 
-OUTPUTS (to --agg-dir /opt/depth-dom/output/aggregate/):
+OUTPUTS (to --agg-dir NQdom/output/aggregate/):
   multi_day_p8_results.csv     — concatenated per-day results
   excursion_aggregate.csv      — excursion statistics aggregated
   feature_importance_ranked.csv — feature importance by mean rank
@@ -13,9 +13,9 @@ OUTPUTS (to --agg-dir /opt/depth-dom/output/aggregate/):
   summary_report.txt           — human-readable summary
 
 USAGE
-    python3 aggregate_results.py \\
-        --output-dir /opt/depth-dom/output \\
-        --agg-dir    /opt/depth-dom/output/aggregate \\
+    python3 NQdom/ORCHESTRATOR/aggregate_results.py \\
+        --output-dir NQdom/output \\
+        --agg-dir    NQdom/output/aggregate \\
         --symbol ES  \\
         --min-days 5
 """
@@ -33,7 +33,6 @@ import numpy as np
 import pandas as pd
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-VPS_BASE = "/opt/depth-dom"
 EXCURSION_TARGET = {
     "ES": {"30t": 10.0,  "60t": 10.0,  "120t": 10.0},   # ES ±10 points
     "NQ": {"30t": 20.0,  "60t": 20.0,  "120t": 20.0},   # NQ ±20 points
@@ -432,10 +431,15 @@ def write_summary(p8_df: pd.DataFrame,
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Aggregate P8 + excursion results")
-    parser.add_argument("--output-dir", default=VPS_BASE + "/output",
+    # Auto-detect local paths
+    script_dir = Path(__file__).parent.resolve()
+    repo_root = script_dir.parent
+    default_output = str(repo_root / "output")
+
+    parser = argparse.ArgumentParser(description="Aggregate P8 + excursion results (LOCAL)")
+    parser.add_argument("--output-dir", default=default_output,
                         help="Path to pipeline output directory")
-    parser.add_argument("--agg-dir", default=VPS_BASE + "/output/aggregate",
+    parser.add_argument("--agg-dir", default=f"{default_output}/aggregate",
                         help="Directory for aggregate outputs")
     parser.add_argument("--symbol", default="ES",
                         choices=["ES", "NQ"],

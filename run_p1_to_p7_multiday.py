@@ -548,27 +548,36 @@ def run_phase5(date: str, out_dir: Path,
 
 def run_phase6(date: str, out_dir: Path,
                cp: CheckpointManager, force: bool = False) -> tuple[bool, str]:
-    if sentinel_done(out_dir, "p6_excursion") and not force:
-        print("    [P6] Already done — SKIP")
-        return True, ""
+    # P6 uses fingerprint-based staleness guard (Apr 13, 2026 fix).
+    # Import here so the module-level functions are available.
+    from P6.vps_excursion_analysis_vectorized import (
+        should_skip_p6 as p6_should_skip,
+        compute_input_fingerprint as p6_fingerprint,
+        save_fingerprint as p6_save_fp,
+        validate_p6_output as p6_validate,
+    )
+
+    sampled_path = out_dir / "sampled_events.csv"
+    if not sampled_path.exists():
+        return False, "sampled_events.csv missing"
+
+    # Staleness check using new P6 fingerprint logic
+    if not force:
+        skip, reason = p6_should_skip(out_dir, sampled_path)
+        if skip:
+            print("    [P6] Already done + input unchanged -- SKIP (fingerprint valid)")
+            cp.set_phase(date, "p6_excursion", PhaseStatus.DONE)
+            return True, ""
+        else:
+            print(f"    [P6] Input changed or no fingerprint: {reason} -- re-running")
 
     features_path = out_dir / "features_dom.csv"
-    snapshots_path = out_dir / "snapshots.csv"
-    sampled_path = out_dir / "sampled_events.csv"
     excursion_path = out_dir / "excursion_stats.csv"
     summary_path = out_dir / "excursion_summary.csv"
     plot_path = out_dir / "excursion_distributions.png"
 
-    if not sampled_path.exists():
-        return False, "sampled_events.csv missing"
     if not features_path.exists():
         return False, "features_dom.csv missing (required for lookup index)"
-
-    if excursion_path.exists() and not force:
-        print("    [P6] excursion_stats.csv exists — SKIP")
-        write_sentinel(out_dir, "p6_excursion", "done")
-        cp.set_phase(date, "p6_excursion", PhaseStatus.DONE)
-        return True, ""
 
     cp.set_phase(date, "p6_excursion", PhaseStatus.RUNNING)
     print(f"    [P6] Excursion analysis (Numba JIT) ...")
@@ -582,6 +591,14 @@ def run_phase6(date: str, out_dir: Path,
     p6_stats = p6_compute(sampled_path, ts_ns, mp, excursion_path)
     print(f"  -> {p6_stats.get('rows_processed', 0):,} rows processed")
 
+    print("  Validating output ratio...")
+    p6_validate(sampled_path, excursion_path, date)
+
+    print("  Saving fingerprint...")
+    fp = p6_fingerprint(sampled_path)
+    p6_save_fp(fp, out_dir)
+    print(f"  -> fingerprint: {fp['fingerprint_ts']}")
+
     print("  Generating summary...")
     p6_summary(excursion_path, summary_path)
 
@@ -593,7 +610,7 @@ def run_phase6(date: str, out_dir: Path,
         write_sentinel(out_dir, "p6_excursion")
         cp.set_phase(date, "p6_excursion", PhaseStatus.DONE)
         sz = excursion_path.stat().st_size / (1024**2)
-        print(f"    [P6] excursion_stats.csv ({sz:.0f}MB) in {elapsed:.0f}s — DONE")
+        print(f"    [P6] excursion_stats.csv ({sz:.0f}MB) in {elapsed:.0f}s -- DONE")
         return True, ""
     else:
         msg = "excursion_stats.csv not produced"

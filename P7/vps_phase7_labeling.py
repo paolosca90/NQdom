@@ -28,13 +28,13 @@ Data sources:
   - excursion_stats.csv    -> mid_price_at_t for each event (same row order)
   - snapshots.csv          -> chronological mid-price path for first-touch scan
 
-Usage:
+Usage (LOCAL):
   python3 phase7_labeling.py \
-      --snapshots  /opt/depth-dom/output/2026-01-08/snapshots.csv \
-      --sampled    /opt/depth-dom/output/2026-01-08/sampled_events.csv \
-      --refprice   /opt/depth-dom/output/2026-01-08/excursion_stats.csv \
-      --grid       /opt/depth-dom/output/_candidates_3.csv \
-      --output     /opt/depth-dom/output/2026-01-08/
+      --snapshots  NQdom/output/2026-03-13/snapshots.csv \
+      --sampled    NQdom/output/2026-03-13/sampled_events.csv \
+      --refprice   NQdom/output/2026-03-13/excursion_stats.csv \
+      --grid       NQdom/output/_candidates_3.csv \
+      --output     NQdom/output/2026-03-13/
       --candidates 10
 """
 
@@ -212,7 +212,8 @@ def label_candidate(
         vb_ticks
     )
     elapsed = time.time() - t0
-    print(f"done in {elapsed:.1f}s  ({n_valid/elapsed:.0f} events/sec)")
+    rate = n_valid / elapsed if elapsed > 0 else n_valid
+    print(f"done in {elapsed:.1f}s  ({rate:.0f} events/sec)")
 
     # Vectorized fast CSV output
     valid_df = df_sampled.iloc[valid_idx].copy()

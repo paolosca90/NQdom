@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DEPTH-DOM is a quantitative trading signal generation pipeline that processes Sierra Chart `.depth` binary order book files through 12 phases to produce ML-trained entry models for futures trading (NQ/ES).
 
-- **VPS:** `root@185.185.82.205` — all heavy processing runs here at `/opt/depth-dom/`
-- **Local:** This repo on your Mac at `/Users/paolo/Desktop/DEPTH DOM VPS/` — source of truth per ogni fase
-- **Source data:** 131 `.depth` files in `/opt/depth-dom/input/NQ*/` on the VPS
+- **Local:** This repo at `C:\Users\Paolo\Desktop\NQ\NQdom\` — source of truth per ogni fase
+- **Source data:** 131 `.depth` files in `NQdom/INPUT/NQ*/`
+- **All pipeline execution runs LOCAL** — no VPS required
 
 ---
 
@@ -19,37 +19,35 @@ NQdom/
 ├── CLAUDE.md                     ← questo file
 ├── PIPELINE_FASI_RIASSUNTO.md   ← riepilogo completo 12 fasi
 │
-├── P1/   depth_parser.py, main.py, README.md
-├── P2/   vps_book_reconstructor.py, README.md
-├── P2b/  vps_phase2b_data_fusion.py, compute_ts_features.py, README.md
-├── P3/   vps_feature_engineering_vectorized.py, README.md
-├── P4/   vps_feature_engineering_agg.py, README.md
-├── P5/   vps_cusum_sampler.py, README.md
-├── P6/   vps_excursion_analysis_vectorized.py, README.md
-├── P7/   vps_phase7_labeling.py, README.md
-├── P8/   vps_phase8_entry_model.py, README.md
-├── P11/  vps_phase11_rl_execution.py, README.md
-├── P12/  vps_phase12_sierra_bridge.py, README.md
+├── P1/   depth_parser.py, main.py
+├── P2/   vps_book_reconstructor.py
+├── P2b/  vps_phase2b_data_fusion.py, compute_ts_features.py
+├── P3/   vps_feature_engineering_vectorized.py
+├── P4/   vps_feature_engineering_agg.py
+├── P5/   vps_cusum_sampler.py
+├── P6/   vps_excursion_analysis_vectorized.py
+├── P7/   vps_phase7_labeling.py
+├── P8/   vps_phase8_entry_model.py
+├── P11/  vps_phase11_rl_execution.py
+├── P12/  vps_phase12_sierra_bridge.py
 │
 ├── SHARED/
 │   ├── _pipeline_constants.py    ← costanti condivise (singola fonte di verità)
 │   └── README.md
 │
 ├── ORCHESTRATOR/
-│   ├── vps_multiday_runner.py    ← batch orchestrator (VPS)
+│   ├── run_p1_to_p7_multiday.py ← P1-P7 multiday runner (LOCAL)
 │   ├── incremental_p7p8_runner.py ← P7/P8 incremental runner
-│   ├── run_p1_to_p7_multiday.py ← local P1-P7 multiday runner
-│   ├── audit_pipeline.py
+│   ├── audit_pipeline.py         ← pipeline audit
+│   ├── audit_p7_results.py        ← P5-P7 data quality + label audit
 │   ├── status_live.py
 │   ├── aggregate_results.py
 │   ├── plot_dashboard.py
-│   ├── vps_watchdog.sh
 │   └── README.md
 │
 ├── INPUT/                        ← .depth source files
 ├── INPUT_TS/                     ← Sierra Chart Time & Sales (.txt)
-├── output/                        ← output per giorno
-└── cron_orchestrator.sh
+└── output/                        ← output per giorno
 ```
 
 ---
@@ -103,69 +101,59 @@ Vertical barrier unit: **TICK CLOCK** (book update count, NOT wall-clock seconds
 
 ---
 
-## Running the Pipeline
+## Running the Pipeline (LOCAL)
 
-### Full Bulk Run (all available days) — on VPS
-
+### P1-P7 Multiday (LOCAL)
 ```bash
-# P1-P8 on all days (4 workers, resume mode)
-python3 /opt/depth-dom/vps_multiday_runner.py --workers 4 --cleanup-policy none --resume
-
-# P1-P6 only (skip P7/P8)
-python3 /opt/depth-dom/vps_multiday_runner.py --workers 4 --skip-p7-p8 --force
+# Multi-day sequential (RAM-safe)
+python3 NQdom/run_p1_to_p7_multiday.py --resume --workers 1
 
 # Force re-run from start
-python3 /opt/depth-dom/vps_multiday_runner.py --workers 4 --force
+python3 NQdom/run_p1_to_p7_multiday.py --force --workers 1
+
+# Target a specific day
+python3 NQdom/P1/main.py --days 2026-03-13 --force
 ```
 
-### Incremental P7/P8 Runner — on VPS (preferred after initial bulk)
-
+### Single Phase
 ```bash
-python3 /opt/depth-dom/incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --workers 4
+python3 NQdom/P1/main.py --days 2026-04-10 --force
 ```
 
-Chiamato ogni 30 min dal cron job.
-
-### Local Multiday P1-P7 (Mac/Windows)
-
+### P8 ML Model Training
 ```bash
-# Target a specific day — use P1/main.py directly (NOT multiday runner --days, that doesn't exist)
-python3 P1/main.py --days 2026-03-13 --force
-
-# Multi-day sequential (RAM-safe, --workers 1)
-python3 run_p1_to_p7_multiday.py --resume --workers 1
-
-# Multiday runner limits to first N days from earliest date — use P1/main.py for single-day targeting
+python3 NQdom/P8/vps_phase8_entry_model.py \
+    --features NQdom/output/2026-03-13/sampled_events.csv \
+    --output   NQdom/output/2026-03-13/
 ```
 
-### Single Day Test — on VPS
-
+### P5-P7 Data Audit
 ```bash
-python3 /opt/depth-dom/P1/main.py --days 2026-01-08 --force
+python3 NQdom/ORCHESTRATOR/audit_p7_results.py --output-dir NQdom/output
+# Output: NQdom/output/_audit/
 ```
 
-### Cron Orchestrator
-
+### Aggregate Cross-Day Results
+```bash
+python3 NQdom/ORCHESTRATOR/aggregate_results.py \
+    --output-dir NQdom/output \
+    --agg-dir    NQdom/output/aggregate
 ```
-*/30 * * * * /bin/bash /opt/depth-dom/cron_orchestrator.sh
-```
-
-Steps: (1) incremental_p7p8_runner, (2) aggregate_results, (3) plot_dashboard.
 
 ---
 
-## VPS — Data Flow Per Day
+## Data Flow Per Day
 
 ```
-/opt/depth-dom/output/{YYYY-MM-DD}/
+NQdom/output/{YYYY-MM-DD}/
 ├── events.csv             (P1)
 ├── snapshots.csv          (P2) — ~427MB/day, deletable after P8
 ├── snapshots_fused.csv    (P2b) — fused LOB + Time & Sales
 ├── features_dom.csv       (P3) — ~310MB/day
 ├── features_dom_agg.csv   (P4)
 ├── sampled_events.csv     (P5) — kept permanently
-├── excursion_stats.csv    (P6) — kept permanently
-├── phase7_labels_*/       (P7) — directories, one per candidate
+├── excursion_stats.csv   (P6) — kept permanently
+├── phase7_labels_*/      (P7) — directories, one per candidate
 ├── _checkpoints/
 │   ├── p1_parse.done, p2_reconstruct.done, p2b_fusion.done, ...
 │   └── p7_c1.done, p7_c2.done, p7_c3.done, p8_ml.done
@@ -188,33 +176,32 @@ Steps: (1) incremental_p7p8_runner, (2) aggregate_results, (3) plot_dashboard.
 
 5. **P5 CUSUM h threshold floor** — h must be at least `2 * tick_size = 0.5` to avoid over-emission. Adaptive calibration doubles h until emission rate ≤ 10%.
 
+6. **P6 checkpoint staleness cascade bug (FIXED Apr 13, 2026)** — P6 stored checkpoint before P5 was fixed, causing 4 corrupt days (03-16, 03-17, 03-18, 03-27). **FIXED**: fingerprint-based staleness guard implemented in `P6/vps_excursion_analysis_vectorized.py` + `run_p1_to_p7_multiday.py`. All 20 days re-validated (1.00x ratio, fingerprint saved). Do NOT use `--force` on all days; it re-runs unnecessary phases.
+
+7. **P7 ZeroDivisionError on fast days (FIXED Apr 13, 2026)** — `label_candidate()` crashed when `elapsed = 0.0` (few snapshots, fast processing). **FIXED**: guard added at line 214: `rate = n_valid / elapsed if elapsed > 0 else n_valid`.
+
+8. **P2 checkpoint staleness (2026-03-17)** — `snapshots.csv` had only 8,459 rows while `events.csv` had 11.5M rows. P2 checkpoint was from partial run. Required P2→P3→P4→P5→P6→P7 full re-run for that day. **FIXED**: `events.csv` now grows correctly, all downstream phases re-run.
+
 ---
 
-## VPS Access
+## Audit Scripts
 
-```
-Host: 185.185.82.205 (primary), 96.30.209.74 (secondary)
-User: root
-Auth: PreferredAuthentications=keyboard-interactive,password
-```
-
-Use `expect` or `sshpass` for non-interactive SSH from the Mac:
+### P5-P7 Data Quality + Label Audit (B1+B2)
 ```bash
-expect -c '
-spawn ssh -o StrictHostKeyChecking=no root@185.185.82.205 {command}
-expect "password:" { send "782789Pao!\r"; expect eof }
-'
+python3 NQdom/ORCHESTRATOR/audit_p7_results.py --output-dir NQdom/output
 ```
+Produces:
+- `label_distribution_daily.csv` — per-day PT%/SL%/V%/balance_ratio
+- `label_distribution_aggregate.csv` — aggregate across 20 days
+- `label_outlier_days.csv` — days with balance_ratio < 0.80
+- `label_summary.txt`
+- `quality_row_counts.csv` — row counts per phase per day
+- `quality_nan_rates.csv` — NaN% per file
+- `quality_duplicates.csv` — duplicate timestamps
+- `quality_anomalies.csv` — outlier days
+- `quality_summary.txt`
 
----
-
-## Important File Locations
-
-| What | Where |
-|------|-------|
-| Pipeline logs | `/opt/depth-dom/pipeline_full3.log` |
-| P7/P8 run log | `/opt/depth-dom/logs/p7p8_run.log` |
-| P7/P8 recovery log | `/opt/depth-dom/logs/p7p8_recovery_run3.log` |
-| Cron log | `/opt/depth-dom/logs/cron_orchestrator.log` |
-| Manifest | `/opt/depth-dom/output/_multiday_manifest.csv` |
-| P7/P8 manifest | `/opt/depth-dom/output/_p7p8_incremental_manifest.csv` |
+### Pipeline Status Audit
+```bash
+python3 NQdom/ORCHESTRATOR/audit_pipeline.py
+```

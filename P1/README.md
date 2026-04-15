@@ -4,6 +4,7 @@
 **Runner:** `main.py` (anche `run_p1_to_p7_multiday.py`)
 
 ## Cosa fa
+
 Legge i file `.depth` binari di Sierra Chart (formato proprietario) e li converte in `events.csv`.
 Filtra automaticamente per la finestra UTC 13:40–19:50 (09:40–15:50 ET, EDT=UTC-4).
 
@@ -40,20 +41,21 @@ Record (24 byte):
 
 ## Input / Output
 
-- **Input:** `/opt/depth-dom/input/NQ*/YYYY-MM-DD.depth`
-- **Output:** `/opt/depth-dom/output/{date}/events.csv`
+- **Input:** `NQdom/INPUT/NQ*/YYYY-MM-DD.depth`
+- **Output:** `NQdom/output/{date}/events.csv`
 - **Checkpoint:** `_checkpoints/p1_parse.done`
 - **Time filter:** 13:40–19:50 UTC (applicato in `records_to_csv_stream_filtered`)
 
 ## Utilizzo
 
 ```bash
-# Single day (VPS)
-python3 main.py --days 2026-01-08 --force
+# Single day
+python3 NQdom/P1/main.py --days 2026-03-13 --force
 
-# Local multiday (P1-P7)
-python3 run_p1_to_p7_multiday.py --days 2026-03-13
+# Multi-day (P1-P7)
+python3 NQdom/run_p1_to_p7_multiday.py --days 2026-03-13
 ```
 
 ## Output CSV
+
 Ogni riga = un evento di modifica del book (Add/Modify/Delete/Trade).

@@ -8,6 +8,22 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #4034 | 9:11 PM | 🔵 | Vectorized DOM feature engineering with pandas | ~345 |
+
+### Apr 14, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #4671 | 9:01 PM | 🔴 | Missing temp file caused Phase 3 failure on 2026-04-07 | ~286 |
+| #4670 | 9:00 PM | 🔴 | 2026-04-07 processing failed with exit code 1 | ~226 |
+| #4668 | 8:50 PM | 🟣 | Batch processing pipeline resuming for remaining dates | ~251 |
+| #4656 | 8:03 PM | 🔴 | Pandas CSV parsing error in feature engineering pipeline | ~280 |
+| #4621 | 5:05 PM | 🟣 | New P3→P7 orchestrator with direct module imports for real-time output | ~386 |
+
+### Apr 15, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #4730 | 7:58 AM | 🔵 | P3 vectorized feature engineering now running for 2026-03-16 fix | ~228 |
 </claude-mem-context>
 
 ## Script

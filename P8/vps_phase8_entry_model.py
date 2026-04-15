@@ -27,10 +27,10 @@ OUTPUTS
   phase8_best_model.pkl
   phase8_oof_predictions.csv
 
-USAGE (VPS):
+USAGE (LOCAL):
   python3 phase8_entry_model.py \
-      --features  /opt/depth-dom/output/2026-01-08/sampled_events.csv \
-      --output    /opt/depth-dom/output/2026-01-08/
+      --features  NQdom/output/2026-03-13/sampled_events.csv \
+      --output    NQdom/output/2026-03-13/
 """
 
 import argparse
@@ -479,11 +479,7 @@ def main():
     # ── 3. Define candidates and load labels ──────────────────────────────
     print(f"\n[3] Loading Phase 7 labels …")
     label_candidates = {}
-    search_dirs = [
-        args.output,
-        Path("/opt/depth-dom/output/2026-01-08/"),
-        Path("/opt/depth-dom/output/"),
-    ]
+    search_dirs = [args.output]
 
     for cand in CANDIDATES:
         fname = label_filename(cand["vb_ticks"], cand["pt_ticks"], cand["sl_ticks"])

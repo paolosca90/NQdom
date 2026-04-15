@@ -1,25 +1,43 @@
 #!/usr/bin/env python3
 """
-audit_pipeline.py — Deep audit of all 24 days' real state.
+audit_pipeline.py — Deep audit of all days' real state (LOCAL).
 For each day, reports:
 - checkpoint states for all phases
 - output file existence/sizes
 - P7 label directory existence
 - .depth file availability
 - computed flags: highest_reached, highest_valid, p7_status, p8_status, ready flags
-"""
-import sys
-sys.path.insert(0, '/opt/depth-dom')
 
+Usage:
+    python3 NQdom/ORCHESTRATOR/audit_pipeline.py --output-dir NQdom/output
+"""
+
+import argparse
 import datetime as dt
 import re
-from pathlib import Path
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
-VPS_BASE = Path("/opt/depth-dom")
-OUT_DIR = VPS_BASE / "output"
-INPUT_DIR = VPS_BASE / "input"
+# ── Auto-detect local paths ──────────────────────────────────────────────────
+SCRIPT_DIR = Path(__file__).parent.resolve()
+REPO_ROOT = SCRIPT_DIR.parent
+
+# ── CLI args ──────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="Pipeline audit (LOCAL)")
+parser.add_argument("--output-dir", type=Path, default=None,
+                    help="Path to NQdom/output (default: auto-detect)")
+parser.add_argument("--input-dir", type=Path, default=None,
+                    help="Path to NQdom/INPUT (default: auto-detect)")
+_args = parser.parse_args()
+
+OUT_DIR = _args.output_dir or (REPO_ROOT / "output")
+INPUT_DIR = _args.input_dir or (REPO_ROOT / "INPUT")
+
+# ── SHARED imports ─────────────────────────────────────────────────────────────
+sys.path.insert(0, str(REPO_ROOT))
+from SHARED._pipeline_constants import CANDIDATES
 
 PHASE_ORDER = [
     "p1_parse", "p2_reconstruct", "p2b_fusion", "p3_features", "p4_agg",
@@ -40,8 +58,6 @@ KEY_FILES = {
 
 # CANDIDATES are imported from _pipeline_constants — DO NOT duplicate here.
 # Add idx locally for audit reporting purposes only.
-import sys
-sys.path.insert(0, '/opt/depth-dom')
 from _pipeline_constants import CANDIDATES
 
 # Local idx map (readonly view — values sourced from _pipeline_constants)

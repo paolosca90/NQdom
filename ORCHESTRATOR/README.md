@@ -1,54 +1,47 @@
-# ORCHESTRATOR — Coordinamento Pipeline
+# ORCHESTRATOR — Pipeline Coordination (LOCAL)
 
-## vps_multiday_runner.py
+All orchestration runs **LOCAL** on this machine. No VPS required.
 
-Coordina P1-P8 su tutti i giorni (4-6 worker paralleli).
+## Scripts
+
+| Script | Tipo | Uso |
+|--------|------|-----|
+| `run_p1_to_p7_multiday.py` | Batch | P1-P7 multiday LOCAL |
+| `incremental_p7p8_runner.py` | Incremental | P7/P8 per nuovi giorni |
+| `audit_p7_results.py` | Audit | P5-P7 quality + label distribution |
+| `audit_pipeline.py` | Audit | Pipeline checkpoint status per tutti i giorni |
+| `aggregate_results.py` | Aggregate | Cross-day P8 results aggregation |
+| `plot_dashboard.py` | Viz | Dashboard plots |
+| `status_live.py` | Status | Live status dashboard |
+
+## P7b Deprecated
+
+P7b (Macro Filter con GEX/Beta-Surprise) è stato rimosso dal pipeline.
+P8 ora consuma direttamente `sampled_events.csv`.
+
+## Audit Outputs
+
+Audit results go to `NQdom/output/_audit/`:
+- `label_distribution_daily.csv` — PT/SL/V% per day per candidate
+- `label_distribution_aggregate.csv` — aggregate across all days
+- `label_outlier_days.csv` — days with balance_ratio < 0.80
+- `label_summary.txt`
+- `quality_row_counts.csv` — row counts per phase
+- `quality_nan_rates.csv` — NaN% per file
+- `quality_anomalies.csv` — detected anomalies
+- `quality_summary.txt`
+
+## Key Commands
 
 ```bash
-python3 vps_multiday_runner.py --workers 4 --force       # full run
-python3 vps_multiday_runner.py --workers 4 --skip-p7-p8  # P1-P6 only
-python3 vps_multiday_runner.py --workers 4 --resume       # resume
+# Audit P5-P7
+python3 NQdom/ORCHESTRATOR/audit_p7_results.py --output-dir NQdom/output
+
+# P1-P7 multiday LOCAL
+python3 NQdom/run_p1_to_p7_multiday.py --resume --workers 1
+
+# Aggregate cross-day results
+python3 NQdom/ORCHESTRATOR/aggregate_results.py \
+    --output-dir NQdom/output \
+    --agg-dir    NQdom/output/aggregate
 ```
-
-## incremental_p7p8_runner.py
-
-Esegue P7+P8 per giorni con P1-P6 completo ma P7/P8 mancante.
-Checkpoint sentinel per idempotenza. Genera automaticamente `snapshots.csv`
-da `events.csv` se mancante (gap del vecchio pipeline Dec 2025).
-**Nota:** P7b (Macro Filter) è stato deprecato e rimosso.
-
-```bash
-python3 incremental_p7p8_runner.py --output-dir /opt/depth-dom/output --workers 4
-```
-
-Chiamato ogni 30 min da `cron_orchestrator.sh`.
-
-## aggregate_results.py
-
-Aggrega i risultati per-day in summary CSV.
-
-## plot_dashboard.py
-
-Genera i plot del dashboard.
-
-## cron_orchestrator.sh
-
-Runs ogni 30 min (root level):
-
-```
-*/30 * * * * /bin/bash /opt/depth-dom/cron_orchestrator.sh
-```
-
-Steps: (1) incremental_p7p8_runner, (2) aggregate_results, (3) plot_dashboard.
-
-## audit_pipeline.py
-
-Audit del pipeline — verifica stato e consistenza dei dati.
-
-## status_live.py
-
-Status live del pipeline — leggibile da terminale.
-
-## vps_watchdog.sh
-
-Watchdog per monitorare processi in crash.

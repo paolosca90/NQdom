@@ -51,6 +51,23 @@ PHASE3_FIELDS = [
     "stack_ask_4", "pull_ask_4",
     "stack_ask_5", "pull_ask_5",
     "ps_weighted_bid", "ps_weighted_ask", "ps_net_weighted", "ps_delta_L1",
+    # Microstructural + flow features (added P3 update)
+    "actual_depth_bid_Xi", "actual_depth_ask_Xi",
+    "flow_limit_add_bid_L1", "flow_cancellation_bid_L1", "flow_market_sell_L1",
+    "flow_limit_add_ask_L1", "flow_cancellation_ask_L1", "flow_market_buy_L1",
+    "flow_limit_add_bid_5", "flow_cancellation_bid_5",
+    "flow_limit_add_ask_5", "flow_cancellation_ask_5",
+    # NEW order flow features
+    "delta_raw", "cum_delta_chunk", "delta_sign",
+    # Diagonal Stacked Imbalances
+    "stacked_imb_ask", "stacked_imb_bid", "stacked_imb_score",
+    "stacked_imb_flag_ask", "stacked_imb_flag_bid",
+    # Exhaustion / Thin Prints
+    "exhaustion_ask_thin", "exhaustion_bid_thin",
+    "exhaustion_ask_zero", "exhaustion_bid_zero", "exhaustion_ratio",
+    # LOB Spatial Density (improved)
+    "lob_max_gap_bid", "lob_max_gap_ask",
+    "lob_vacuum_count_bid", "lob_vacuum_count_ask", "lob_vacuum_score",
 ]
 
 PROGRESS_EVERY = 200_000
@@ -322,6 +339,19 @@ def cusum_sample(
         # Merge chunk with its corresponding agg chunk (positional alignment)
         agg_cols_to_add = [c for c in chunk_agg.columns if c not in chunk_feat.columns]
         df_merged = pd.concat([chunk_feat, chunk_agg[agg_cols_to_add]], axis=1)
+
+        # De-duplicate: P4 aggregation windows can span snapshot boundaries,
+        # causing chunk_agg to have more rows than chunk_feat (one snapshot
+        # falls into multiple time windows). Positional concat then creates
+        # duplicate rows. Keep only the first occurrence per timestamp.
+        before = len(df_merged)
+        df_merged = df_merged.drop_duplicates(subset=["ts"], keep="first")
+        after = len(df_merged)
+        if before != after:
+            pct = (before - after) / before * 100
+            print(f"    chunk {chunk_idx+1}: P4 dedup: {before:,} -> {after:,} rows "
+                  f"(removed {before-after:,} dupes, {pct:.1f}%)")
+
 
         # mid_price_diff in CSV is cumulative from session start.
         # diff it to get true per-snapshot delta, using last cum as next chunk's baseline.

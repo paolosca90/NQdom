@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-status_live.py — Live Operational Status for DEPTH-DOM Pipeline
-================================================================
+status_live.py — Live Operational Status for DEPTH-DOM Pipeline (LOCAL)
+========================================================================
 Reads checkpoint files, process table, and log tail to produce a complete
 operational view of every pipeline day.
 
-Output: /opt/depth-dom/output/_live_status.json
+Output: NQdom/output/_live_status.json
 Human-readable table printed to stdout.
 
 Usage:
-    python3 /opt/depth-dom/status_live.py
-    python3 /opt/depth-dom/status_live.py --output-dir /opt/depth-dom/output
-    python3 /opt/depth-dom/status_live.py --json-only   # suppress table output
-    python3 /opt/depth-dom/status_live.py --plan         # grouped recovery queues
+    python3 NQdom/ORCHESTRATOR/status_live.py --output-dir NQdom/output
+    python3 NQdom/ORCHESTRATOR/status_live.py --output-dir NQdom/output --json-only
+    python3 NQdom/ORCHESTRATOR/status_live.py --output-dir NQdom/output --plan
 """
 
 import argparse
@@ -29,8 +28,9 @@ from pathlib import Path
 
 # ── Constants ───────────────────────────────────────────────────────────────────
 
-VPS_BASE = "/opt/depth-dom"
-OUTPUT_DIR_DEFAULT = "/opt/depth-dom/output"
+SCRIPT_DIR = Path(__file__).parent.resolve()
+REPO_ROOT = SCRIPT_DIR.parent
+OUTPUT_DIR_DEFAULT = str(REPO_ROOT / "output")
 LIVE_STATUS_FILE = "_live_status.json"
 
 PHASE_ORDER = [
@@ -205,7 +205,7 @@ def get_all_pipeline_processes() -> dict[int, dict]:
 
 
 def get_log_tail(date: str, n_lines: int = 5) -> str:
-    log_path = Path(VPS_BASE) / "pipeline_full3.log"
+    log_path = Path(OUTPUT_DIR_DEFAULT) / "pipeline_full3.log"
     if not log_path.exists():
         return ""
     try:
@@ -268,7 +268,7 @@ def has_output(out_dir: Path, phase_key: str) -> tuple[bool, int | None]:
 
 def get_depth_files_for_date(date: str) -> list[Path]:
     """Find .depth files matching a date."""
-    input_dir = Path(VPS_BASE) / "input"
+    input_dir = Path(OUTPUT_DIR_DEFAULT).parent / "INPUT"
     year, month, day_num = date.split("-")
     pattern = f"*{year}{month}{day_num}*.depth"
     try:
@@ -884,7 +884,7 @@ def main():
 
     result = {
         "generated_at": dt.datetime.now().isoformat(),
-        "vps_base": VPS_BASE,
+        "vps_base": REPO_ROOT.name,
         "output_dir": str(output_dir),
         "total_days": len(days),
         "duplicate_runners": duplicate_report,
