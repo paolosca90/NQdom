@@ -47,7 +47,8 @@ NQdom/
 │
 ├── INPUT/                        ← .depth source files
 ├── INPUT_TS/                     ← Sierra Chart Time & Sales (.txt)
-└── output/                        ← output per giorno
+├── OUTPUT_TS/                    ← Sierra Chart Time & Sales source data for P2b (active input)
+└── output/                       ← output per giorno
 ```
 
 ---

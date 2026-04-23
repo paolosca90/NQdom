@@ -57,8 +57,11 @@ PHASE3_FIELDS = [
     "flow_limit_add_ask_L1", "flow_cancellation_ask_L1", "flow_market_buy_L1",
     "flow_limit_add_bid_5", "flow_cancellation_bid_5",
     "flow_limit_add_ask_5", "flow_cancellation_ask_5",
-    # NEW order flow features
+    # NEW order flow features (from P2b T&S fusion)
     "delta_raw", "cum_delta_chunk", "delta_sign",
+    # T&S enrichment: trade attached to each sampled event via merge_asof
+    "trade_side", "trade_size", "trade_delta",
+    "cum_trade_delta_session",
     # Diagonal Stacked Imbalances
     "stacked_imb_ask", "stacked_imb_bid", "stacked_imb_score",
     "stacked_imb_flag_ask", "stacked_imb_flag_bid",
@@ -239,11 +242,55 @@ def _cusum_filter_numpy(deltas: np.ndarray, h: float) -> tuple[np.ndarray, np.nd
     return emit_mask, cusum_out
 
 
+def _enrich_batch_ts(batch: list[dict], ts_vals, size_vals, delta_vals,
+                     cum_delta_trades, cum_trade_delta_ref: float) -> float:
+    """
+    Attach T&S trade data to each row in batch using binary search (numpy searchsorted).
+    Updates each row dict with: trade_side, trade_size, trade_delta, cum_trade_delta_session.
+    Returns the updated cum_trade_delta_ref for the NEXT batch.
+    """
+    if not batch:
+        return cum_trade_delta_ref
+
+    # Parse event timestamps
+    event_ts = np.empty(len(batch), dtype='datetime64[ms]')
+    for i, row in enumerate(batch):
+        ts_str = str(row.get('ts', '')).replace(' UTC', '')
+        try:
+            event_ts[i] = np.datetime64(ts_str, 'ms')
+        except Exception:
+            event_ts[i] = np.datetime64('NaT')
+
+    # For each event: find nearest trade at or before event timestamp
+    # np.searchsorted returns insertion position — use pos-1 for backward merge
+    indices = np.searchsorted(ts_vals, event_ts) - 1
+    indices = np.clip(indices, 0, len(ts_vals) - 1)
+
+    # Verify trade is at or before event
+    valid = ts_vals[indices] <= event_ts
+
+    for i, row in enumerate(batch):
+        if valid[i]:
+            row['trade_side'] = 'buy' if delta_vals[indices[i]] > 0 else 'sell'
+            row['trade_size']  = float(size_vals[indices[i]])
+            row['trade_delta'] = float(delta_vals[indices[i]])
+            cum_trade_delta_ref += delta_vals[indices[i]]
+        else:
+            row['trade_side'] = 'none'
+            row['trade_size']  = 0.0
+            row['trade_delta'] = 0.0
+            # cum_trade_delta_ref stays the same (no new trade)
+        row['cum_trade_delta_session'] = float(cum_trade_delta_ref)
+
+    return cum_trade_delta_ref
+
+
 def cusum_sample(
     features_path: Path,
     agg_path: Path,
     output_path: Path,
     percentile: float = 5.0,
+    trades_path: Path | None = None,
 ) -> dict[str, Any]:
     """
     Two-pass CUSUM sampling.
@@ -260,6 +307,56 @@ def cusum_sample(
         "last_ts": None,
     }
 
+    # ── T&S Enrichment: load trades once ─────────────────────────────────────
+    # Each sampled event gets the nearest T&S trade (backward merge_asof).
+    # This gives us real trade_side, trade_size, trade_delta for every event.
+    import pandas as pd
+
+    TS_ENRICH_READY = False
+    if trades_path is not None and trades_path.exists():
+        print(f"  [T&S] Loading trades from {trades_path} ...")
+        try:
+            trades_df = pd.read_csv(trades_path, skipinitialspace=True)
+            trades_df.columns = [c.lower().strip() for c in trades_df.columns]
+
+            # Detect format (canonical: ts,price,size,side | Sierra: date,time,last,volume,bidvolume,askvolume)
+            if 'ts' in trades_df.columns:
+                trades_df['ts_dt'] = pd.to_datetime(
+                    trades_df['ts'].str.replace(' UTC', '', regex=False),
+                    format='mixed', errors='coerce'
+                )
+                trades_df = trades_df.sort_values('ts_dt').reset_index(drop=True)
+            elif 'date' in trades_df.columns:
+                trades_df['ts'] = (trades_df['date'].astype(str) + ' ' + trades_df['time'].astype(str)).str.strip()
+                trades_df['ts_dt'] = pd.to_datetime(trades_df['ts'], format='mixed', errors='coerce')
+                trades_df = trades_df.sort_values('ts_dt').reset_index(drop=True)
+                # Derive side from bidvolume/askvolume
+                bv = pd.to_numeric(trades_df.get('bidvolume', 0), errors='coerce').fillna(0)
+                av = pd.to_numeric(trades_df.get('askvolume', 0), errors='coerce').fillna(0)
+                cond = [(av > 0) & (bv == 0), (bv > 0) & (av == 0),
+                        (av > bv), (bv > av)]
+                ch   = ['buy', 'sell', 'buy', 'sell']
+                trades_df['side'] = np.select(cond, ch, default='_skip_')
+                trades_df = trades_df[trades_df['side'] != '_skip_'].copy()
+                if 'size' not in trades_df.columns:
+                    trades_df['size'] = pd.to_numeric(trades_df.get('volume', 1), errors='coerce').fillna(1)
+            else:
+                raise ValueError("Cannot detect trades format")
+
+            # Build numpy arrays for fast binary search
+            ts_vals   = trades_df['ts_dt'].values.astype('datetime64[ms]')
+            size_vals = pd.to_numeric(trades_df['size'], errors='coerce').fillna(1).values.astype(np.float64)
+            # trade_delta: +size for buy, -size for sell
+            side_arr  = trades_df['side'].str.lower().values
+            delta_vals = np.where(side_arr == 'buy', size_vals, -size_vals)
+            # Cumulative delta from session start: cum_delta[i] = sum(delta[0..i])
+            cum_delta_trades = np.cumsum(delta_vals)
+
+            TS_ENRICH_READY = True
+            print(f"  [T&S] {len(ts_vals):,} trades loaded for enrichment")
+        except Exception as ex:
+            print(f"  [T&S] WARNING: failed to load trades ({ex}) -- continuing without T&S enrichment")
+
     # ------------------------------------------------------------------
     # Pass 1: compute h from TRUE snapshot-to-snapshot deltas (VECTORIZED)
     # IMPORTANT: mid_price_diff in features_dom.csv is CUMULATIVE from session
@@ -268,19 +365,27 @@ def cusum_sample(
     print("  [Pass 1] Computing h from true per-snapshot |d_mid_price| (vectorized)...")
     import pandas as pd
 
-    # Read mid_price_diff column and diff it to get true per-snapshot delta
-    df_d = pd.read_csv(features_path, usecols=['mid_price_diff'], engine='c')
-    mid_diff_cum = pd.to_numeric(df_d['mid_price_diff'], errors='coerce').fillna(0.0).values
-    # np.diff gives consecutive diffs: delta[0]=cum[0], delta[i]=cum[i]-cum[i-1]
-    # The first delta (prepend=mid_diff_cum[0]) is 0: we use the first mid_price as
+    # Read microprice column and diff it to get true per-snapshot delta.
+    # Old schema (mid_price_diff) was CUMULATIVE from session start.
+    # New MOMENTUM schema has microprice as a price level — diff() gives per-snapshot delta.
+    # usecols + float32 reduces Pass 1 peak RAM from ~600MB to ~250MB
+    df_pass1 = pd.read_csv(
+        features_path,
+        usecols=['ts', 'microprice'],
+        dtype={'microprice': 'float32'},
+        engine='c'
+    )
+    microprice_vals = pd.to_numeric(df_pass1['microprice'], errors='coerce').fillna(0.0).values
+    del df_pass1
+    import gc; gc.collect()
+    # np.diff gives consecutive diffs: delta[0]=microprice[0], delta[i]=microprice[i]-microprice[i-1]
+    # The first delta (prepend=microprice[0]) is 0: we use the first microprice as
     # the baseline so CUSUM warmup does not generate a false emission.
-    true_deltas = np.diff(mid_diff_cum, prepend=mid_diff_cum[0])
+    true_deltas = np.diff(microprice_vals, prepend=microprice_vals[0])
     abs_deltas = np.abs(true_deltas)
     non_zero = abs_deltas[abs_deltas > 0]
     n = len(non_zero)
     rows_count = len(abs_deltas)
-
-    del df_d, mid_diff_cum, true_deltas
 
     print(f"  [Pass 1] {n:,} non-zero deltas out of {rows_count:,} total ({100*n/max(rows_count,1):.1f}%)")
     if n == 0:
@@ -313,10 +418,17 @@ def cusum_sample(
     # Chunk size: 2M rows -- larger chunks = fewer loops, more efficiency
     CHUNK_SIZE = 2_000_000
 
+    # P2b T&S fix: delta features computed from features_dom delta_raw
+    NEW_TS_FEATURES = [
+        'cum_delta_session', 'delta_rolling_sum_30', 'delta_rolling_sum_5',
+    ]
     # Get agg columns once
     df_agg_header = pd.read_csv(agg_path, nrows=0)
     agg_cols = [c for c in df_agg_header.columns if c != 'ts']
-    out_fields = PHASE3_FIELDS + agg_cols
+    # Build dtype map: all non-ts columns as float32 to halve memory vs float64
+    all_out_cols = PHASE3_FIELDS + agg_cols + NEW_TS_FEATURES
+    dtype_map = {c: 'float32' for c in all_out_cols if c != 'ts'}
+    out_fields = PHASE3_FIELDS + agg_cols + NEW_TS_FEATURES
 
     stats["rows_read"] = 0
     stats["rows_sampled"] = 0
@@ -326,8 +438,8 @@ def cusum_sample(
     sampled_rows: list[dict] = []
     first_ts_captured = False
 
-    # Read both files in synchronized chunks
-    feat_reader = pd.read_csv(features_path, chunksize=CHUNK_SIZE, engine='c')
+    # Read both files in synchronized chunks — float32 dtype halves memory vs float64
+    feat_reader = pd.read_csv(features_path, chunksize=CHUNK_SIZE, engine='c', dtype=dtype_map)
     agg_reader = pd.read_csv(agg_path, chunksize=CHUNK_SIZE, engine='c')
 
     f_out = open(output_path, "w", newline="", encoding="utf-8")
@@ -335,6 +447,15 @@ def cusum_sample(
     writer.writeheader()  # write header immediately, before any data
 
     prev_mid_diff = 0.0  # carries last cumulative mid_price_diff across chunks
+    # P2b T&S fix: carry cumulative delta across P3 chunk boundaries
+    # cum_delta_chunk in P3 resets at each 250K-row chunk boundary.
+    # We track the TRUE session-long cumulative delta.
+    prev_cum_delta = 0.0  # cumulative delta from session start (updated at each chunk end)
+    # Rolling delta over sampled events (maintained as a deque for O(1) window)
+    sampled_delta_history = []  # delta_raw values of all sampled events so far (session-wide)
+    # T&S enrichment: running cum_trade_delta across all emitted events
+    cum_trade_delta_ref = 0.0  # session-long cumulative trade delta (for cum_trade_delta_session)
+
     for chunk_idx, (chunk_feat, chunk_agg) in enumerate(zip(feat_reader, agg_reader)):
         # Merge chunk with its corresponding agg chunk (positional alignment)
         agg_cols_to_add = [c for c in chunk_agg.columns if c not in chunk_feat.columns]
@@ -353,13 +474,25 @@ def cusum_sample(
                   f"(removed {before-after:,} dupes, {pct:.1f}%)")
 
 
-        # mid_price_diff in CSV is cumulative from session start.
-        # diff it to get true per-snapshot delta, using last cum as next chunk's baseline.
-        mid_diff_cum = pd.to_numeric(df_merged['mid_price_diff'], errors='coerce').fillna(0.0).values
-        mid_deltas = np.diff(mid_diff_cum, prepend=prev_mid_diff)
-        prev_mid_diff = mid_diff_cum[-1]  # carry last cumulative value to next chunk
-        # First delta of each chunk (after prepend) is now 0 -- warmup, not a signal.
-        del mid_diff_cum
+        # microprice in new MOMENTUM schema is a price level — diff to get per-snapshot delta.
+        # Old code used mid_price_diff (cumulative). Using microprice is better:
+        # microprice reacts to LOB volume imbalances BEFORE mid-price ticks,
+        # so CUSUM triggers when institutional pressure builds up.
+        microprice_vals = pd.to_numeric(df_merged['microprice'], errors='coerce').fillna(0.0).values
+        mid_deltas = np.diff(microprice_vals, prepend=prev_mid_diff)
+        prev_mid_diff = microprice_vals[-1]  # carry last value to next chunk
+        # First delta of each chunk (after prepend) is 0 -- warmup, not a signal.
+        del microprice_vals
+
+        # P2b T&S fix: compute TRUE cumulative delta across chunks
+        # cum_delta_chunk in P3 MOMENTUM resets at each 250K-row chunk boundary.
+        # We track the TRUE session-long cumulative delta.
+        dr_vals = pd.to_numeric(df_merged['cum_delta_chunk'], errors='coerce').fillna(0.0).values
+        dr_cumsum = np.cumsum(dr_vals)          # cumsum within this chunk
+        # cum_delta_session = delta from session start up to each row in this chunk
+        cum_delta_session = prev_cum_delta + dr_cumsum
+        # Update carry-forward for next chunk
+        prev_cum_delta = prev_cum_delta + dr_cumsum[-1]  # add chunk's net delta
 
         # Run CUSUM filter -- returns boolean mask of emitted rows
         emit_mask, _ = cusum_filter(mid_deltas, h)
@@ -381,11 +514,33 @@ def cusum_sample(
                 out_row[k] = row[k] if k in row.index else ""
             for k in agg_cols:
                 out_row[k] = row[k] if k in row.index else ""
+
+            # P2b T&S fix: add session-long delta features
+            # cum_delta_session: cumulative delta from session start (13:40 UTC) to this row
+            # This carries across P3 chunk boundaries unlike cum_delta_chunk which resets
+            out_row['cum_delta_session'] = float(cum_delta_session[row_idx])
+
+            # delta_rolling_sum_30: rolling sum of delta_raw over the last 30 SAMPLED events
+            sampled_delta_history.append(float(dr_vals[row_idx]))
+            if len(sampled_delta_history) > 30:
+                sampled_delta_history.pop(0)
+            out_row['delta_rolling_sum_30'] = sum(sampled_delta_history)
+
+            # delta_rolling_sum_5: short-term momentum
+            recent_5 = sampled_delta_history[-5:] if len(sampled_delta_history) >= 5 else sampled_delta_history
+            out_row['delta_rolling_sum_5'] = sum(recent_5)
+
             sampled_rows.append(out_row)
             emitted_count += 1
 
             # Flush to disk every BATCH_FLUSH rows -- keeps memory bounded
             if len(sampled_rows) >= BATCH_FLUSH:
+                # ── T&S enrichment for this batch ───────────────────────────────
+                if TS_ENRICH_READY:
+                    cum_trade_delta_ref = _enrich_batch_ts(
+                        sampled_rows, ts_vals, size_vals, delta_vals,
+                        cum_delta_trades, cum_trade_delta_ref)
+                # ── write batch ────────────────────────────────────────────────
                 writer.writerows(sampled_rows)
                 sampled_rows.clear()
 
@@ -396,8 +551,12 @@ def cusum_sample(
 
         del df_merged, mid_deltas, emit_mask
 
-    # Flush any remaining rows
+    # Flush any remaining rows (with T&S enrichment)
     if sampled_rows:
+        if TS_ENRICH_READY:
+            cum_trade_delta_ref = _enrich_batch_ts(
+                sampled_rows, ts_vals, size_vals, delta_vals,
+                cum_delta_trades, cum_trade_delta_ref)
         writer.writerows(sampled_rows)
         sampled_rows.clear()
 
@@ -449,6 +608,8 @@ if __name__ == "__main__":
     parser.add_argument("--agg", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--percentile", type=float, default=5.0)
+    parser.add_argument("--trades", type=Path, default=None,
+                        help="Path to trades.csv for T&S enrichment (optional)")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -460,9 +621,11 @@ if __name__ == "__main__":
     print(f"Agg      : {args.agg}")
     print(f"Output   : {args.output}")
     print(f"Percentile: {args.percentile}")
+    print(f"Trades   : {args.trades or 'none (no T&S enrichment)'}")
     print()
 
-    stats = cusum_sample(args.features, args.agg, args.output, args.percentile)
+    stats = cusum_sample(args.features, args.agg, args.output,
+                         args.percentile, args.trades)
     print_report(stats)
     if stats["rows_sampled"] == 0:
         print("[P5] FATAL: 0 samples emitted -- refusing to produce empty output.")

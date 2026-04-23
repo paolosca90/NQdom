@@ -15,6 +15,19 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #3837 | 3:43 PM | 🔵 | NQ trading pipeline project structure | ~302 |
+
+### Apr 20, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #5994 | 10:11 PM | 🔵 | Original p8_5 evaluator blocked — p8_ml has not run for any date | ~424 |
+| #5992 | 9:57 PM | 🔵 | Found P8 pipeline scripts in repository | ~318 |
+
+### Apr 22, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #6416 | 2:50 PM | 🔵 | Pipeline constants reveal trading schedule, barrier candidates, and 70+ feature set | ~402 |
 </claude-mem-context>
 
 ## _pipeline_constants.py

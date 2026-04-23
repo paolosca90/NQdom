@@ -56,5 +56,4 @@ python3 NQdom/ORCHESTRATOR/aggregate_results.py \
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #3999 | 8:19 PM | 🔵 | VPS multi-day DOM pipeline orchestrator exists | ~308 |
-| #3837 | 3:43 PM | 🔵 | NQ trading pipeline project structure | ~302 |
 </claude-mem-context>

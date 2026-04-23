@@ -63,6 +63,9 @@ def build_snapshot_index(snapshots_path: Path):
     """
     df = pd.read_csv(snapshots_path, usecols=["ts", "mid_price"], engine="c",
                      dtype={"mid_price": "float32"})
+    # Handle snapshots_fused.csv which has 'time' column instead of 'ts'
+    if "ts" not in df.columns and "time" in df.columns:
+        df = df.rename(columns={"time": "ts"})
     # Fast convert to nanoseconds
     df["ts"] = df["ts"].str.replace(" UTC", "")
     df.dropna(subset=["ts"], inplace=True)

@@ -48,33 +48,25 @@ WINDOW_1S_MS = 1_000
 WINDOW_5S_MS = 5_000
 WINDOW_30S_MS = 30_000
 
-EXHAUSTION_THRESHOLD = 1.0
 PROGRESS_EVERY = 100_000
 
-# Column indices in features_dom.csv (for itertuples fast access)
-# ts, spread_ticks, microprice, mid_price_diff, imbalance_1, imbalance_5,
-# imbalance_10, bid_depth_5, ask_depth_5, depth_ratio, bid_qty_1, ask_qty_1,
-# stack_bid_1, pull_bid_1, stack_bid_2, pull_bid_2, stack_bid_3, pull_bid_3,
-# stack_bid_4, pull_bid_4, stack_bid_5, pull_bid_5, stack_ask_1, pull_ask_1,
-# stack_ask_2, pull_ask_2, stack_ask_3, pull_ask_3, stack_ask_4, pull_ask_4,
-# stack_ask_5, pull_ask_5, ps_weighted_bid, ps_weighted_ask,
-# ps_net_weighted, ps_delta_L1
-COL_TS = 0
-COL_IMBALANCE_1 = 4
-COL_PS_NET_WEIGHTED = 34
-COL_PS_DELTA_L1 = 35
-COL_PULL_BID_1 = 13
-COL_STACK_BID_1 = 12
-COL_PULL_ASK_1 = 23
-COL_STACK_ASK_1 = 22
-COL_BID_QTY_1 = 10
-COL_ASK_QTY_1 = 11
-
 # Only columns we need (for usecols)
+# Updated Apr 2026 for MOMENTUM feature set (P3 rebuild)
 NEEDED_COLS = [
-    'ts', 'imbalance_1', 'ps_net_weighted', 'ps_delta_L1',
-    'pull_bid_1', 'stack_bid_1', 'pull_ask_1', 'stack_ask_1',
-    'bid_qty_1', 'ask_qty_1'
+    'ts',
+    'imbalance_1',
+    'delta_50', 'delta_100', 'delta_200',
+    'imb_trend_10', 'imb_trend_50',
+    'imb_ma_ratio_10', 'imb_ma_ratio_50',
+    'microprice_momentum_10', 'microprice_momentum_50',
+    'microprice_dev_from_ma',
+    'ps_delta_L1',
+    'ofi_50', 'ofi_100', 'ofi_500',
+    'stack_sweep_bid_flag', 'stack_sweep_ask_flag',
+    'stack_sweep_any_flag',
+    'bid_sweep_count', 'ask_sweep_count',
+    'vwap_dev_ticks',
+    'vpin_100',
 ]
 
 # ---------------------------------------------------------------------------
@@ -83,15 +75,30 @@ NEEDED_COLS = [
 
 AGG_FEATURE_FIELDS = [
     "ts",
+    # Imbalance rolling stats
     "imbalance_mean_1s", "imbalance_std_1s",
     "imbalance_mean_5s", "imbalance_std_5s",
     "imbalance_mean_30s", "imbalance_std_30s",
-    "ps_net_weighted_mean_1s", "ps_net_weighted_mean_5s", "ps_net_weighted_mean_30s",
-    "pull_bid_1_sum_1s", "stack_bid_1_sum_1s",
-    "pull_ask_1_sum_1s", "stack_ask_1_sum_1s",
+    # Cumulative delta rolling stats
+    "delta_50_mean_1s", "delta_50_std_1s",
+    "delta_100_mean_1s", "delta_100_std_1s",
+    "delta_200_mean_1s", "delta_200_std_1s",
+    # Imbalance trend rolling
+    "imb_trend_10_mean_1s", "imb_trend_50_mean_1s",
+    "imb_ma_ratio_10_mean_1s", "imb_ma_ratio_50_mean_1s",
+    # Microprice momentum rolling
+    "microprice_momentum_10_mean_1s", "microprice_momentum_50_mean_1s",
+    "microprice_dev_from_ma_mean_1s",
+    # OFI rolling
+    "ofi_50_mean_1s", "ofi_100_mean_1s", "ofi_500_mean_1s",
     "ps_delta_L1_mean_1s", "ps_delta_L1_mean_5s", "ps_delta_L1_mean_30s",
-    "update_rate_1s",
-    "queue_exhaustion_1s",
+    # Sweep rolling (boolean flags)
+    "stack_sweep_bid_flag_sum_1s", "stack_sweep_ask_flag_sum_1s",
+    "stack_sweep_any_flag_sum_1s",
+    "bid_sweep_count_mean_1s", "ask_sweep_count_mean_1s",
+    # Session features
+    "vwap_dev_ticks_mean_1s",
+    "vpin_100_mean_1s",
 ]
 
 
@@ -262,13 +269,7 @@ def aggregate_features_chunked(
     }
 
     print("  [P4] Streaming with pandas vectorized rolling (chunked)...")
-    
-    needed_cols = [
-        'ts', 'imbalance_1', 'ps_net_weighted', 'ps_delta_L1',
-        'pull_bid_1', 'stack_bid_1', 'pull_ask_1', 'stack_ask_1',
-        'bid_qty_1', 'ask_qty_1'
-    ]
-    
+
     first_chunk = True
     last_overlap = pd.DataFrame()
     chunksize = 2_000_000  # 30s overlap = ~1.5M rows at 50K/sec → 75% of 2M, OK
@@ -278,7 +279,7 @@ def aggregate_features_chunked(
     
     output_cols = AGG_FEATURE_FIELDS.copy()
 
-    with pd.read_csv(input_path, usecols=needed_cols, chunksize=chunksize, iterator=True) as reader:
+    with pd.read_csv(input_path, usecols=NEEDED_COLS, chunksize=chunksize, iterator=True) as reader:
         for chunk in reader:
             # Parse datetime — strip trailing UTC/utc before parsing
             # Historical data: '2026-03-13 13:40:00.000000 UTC'
@@ -323,40 +324,61 @@ def aggregate_features_chunked(
             if df.index.has_duplicates:
                 df = df.sort_index()
 
-            # Compute queue exhaustion
-            is_exhaustion = ((df['bid_qty_1'] <= EXHAUSTION_THRESHOLD) | (df['ask_qty_1'] <= EXHAUSTION_THRESHOLD)).astype(int)
-
             r1s = df.rolling('1s')
             r5s = df.rolling('5s')
             r30s = df.rolling('30s')
-            
+
             df_out = pd.DataFrame(index=df.index)
-            # Need ms from midnight based on the target specification
-            df_out['ts'] = df.index.hour * 3600_000 + df.index.minute * 60_000 + df.index.second * 1_000 + df.index.microsecond // 1_000
-            
+            df_out['ts'] = (df.index.hour * 3600_000 + df.index.minute * 60_000 +
+                            df.index.second * 1_000 + df.index.microsecond // 1_000)
+
+            # Imbalance rolling stats
             df_out['imbalance_mean_1s'] = r1s['imbalance_1'].mean().fillna(0.0).round(6)
             df_out['imbalance_std_1s'] = r1s['imbalance_1'].std().fillna(0.0).round(6)
             df_out['imbalance_mean_5s'] = r5s['imbalance_1'].mean().fillna(0.0).round(6)
             df_out['imbalance_std_5s'] = r5s['imbalance_1'].std().fillna(0.0).round(6)
             df_out['imbalance_mean_30s'] = r30s['imbalance_1'].mean().fillna(0.0).round(6)
             df_out['imbalance_std_30s'] = r30s['imbalance_1'].std().fillna(0.0).round(6)
-            
-            df_out['ps_net_weighted_mean_1s'] = r1s['ps_net_weighted'].mean().fillna(0.0).round(6)
-            df_out['ps_net_weighted_mean_5s'] = r5s['ps_net_weighted'].mean().fillna(0.0).round(6)
-            df_out['ps_net_weighted_mean_30s'] = r30s['ps_net_weighted'].mean().fillna(0.0).round(6)
-            
-            df_out['pull_bid_1_sum_1s'] = r1s['pull_bid_1'].sum().fillna(0.0).round(2)
-            df_out['stack_bid_1_sum_1s'] = r1s['stack_bid_1'].sum().fillna(0.0).round(2)
-            df_out['pull_ask_1_sum_1s'] = r1s['pull_ask_1'].sum().fillna(0.0).round(2)
-            df_out['stack_ask_1_sum_1s'] = r1s['stack_ask_1'].sum().fillna(0.0).round(2)
-            
+
+            # Cumulative delta rolling stats
+            df_out['delta_50_mean_1s'] = r1s['delta_50'].mean().fillna(0.0).round(6)
+            df_out['delta_50_std_1s'] = r1s['delta_50'].std().fillna(0.0).round(6)
+            df_out['delta_100_mean_1s'] = r1s['delta_100'].mean().fillna(0.0).round(6)
+            df_out['delta_100_std_1s'] = r1s['delta_100'].std().fillna(0.0).round(6)
+            df_out['delta_200_mean_1s'] = r1s['delta_200'].mean().fillna(0.0).round(6)
+            df_out['delta_200_std_1s'] = r1s['delta_200'].std().fillna(0.0).round(6)
+
+            # Imbalance trend rolling
+            df_out['imb_trend_10_mean_1s'] = r1s['imb_trend_10'].mean().fillna(0.0).round(6)
+            df_out['imb_trend_50_mean_1s'] = r1s['imb_trend_50'].mean().fillna(0.0).round(6)
+            df_out['imb_ma_ratio_10_mean_1s'] = r1s['imb_ma_ratio_10'].mean().fillna(0.0).round(6)
+            df_out['imb_ma_ratio_50_mean_1s'] = r1s['imb_ma_ratio_50'].mean().fillna(0.0).round(6)
+
+            # Microprice momentum rolling
+            df_out['microprice_momentum_10_mean_1s'] = r1s['microprice_momentum_10'].mean().fillna(0.0).round(6)
+            df_out['microprice_momentum_50_mean_1s'] = r1s['microprice_momentum_50'].mean().fillna(0.0).round(6)
+            df_out['microprice_dev_from_ma_mean_1s'] = r1s['microprice_dev_from_ma'].mean().fillna(0.0).round(6)
+
+            # OFI rolling
+            df_out['ofi_50_mean_1s'] = r1s['ofi_50'].mean().fillna(0.0).round(6)
+            df_out['ofi_100_mean_1s'] = r1s['ofi_100'].mean().fillna(0.0).round(6)
+            df_out['ofi_500_mean_1s'] = r1s['ofi_500'].mean().fillna(0.0).round(6)
+
+            # PS delta rolling
             df_out['ps_delta_L1_mean_1s'] = r1s['ps_delta_L1'].mean().fillna(0.0).round(6)
             df_out['ps_delta_L1_mean_5s'] = r5s['ps_delta_L1'].mean().fillna(0.0).round(6)
             df_out['ps_delta_L1_mean_30s'] = r30s['ps_delta_L1'].mean().fillna(0.0).round(6)
-            
-            df_out['update_rate_1s'] = r1s['imbalance_1'].count().fillna(0).astype(int)
-            
-            df_out['queue_exhaustion_1s'] = is_exhaustion.rolling('1s').sum().fillna(0).astype(int)
+
+            # Sweep rolling (boolean flags)
+            df_out['stack_sweep_bid_flag_sum_1s'] = r1s['stack_sweep_bid_flag'].sum().fillna(0).astype(int)
+            df_out['stack_sweep_ask_flag_sum_1s'] = r1s['stack_sweep_ask_flag'].sum().fillna(0).astype(int)
+            df_out['stack_sweep_any_flag_sum_1s'] = r1s['stack_sweep_any_flag'].sum().fillna(0).astype(int)
+            df_out['bid_sweep_count_mean_1s'] = r1s['bid_sweep_count'].mean().fillna(0.0).round(4)
+            df_out['ask_sweep_count_mean_1s'] = r1s['ask_sweep_count'].mean().fillna(0.0).round(4)
+
+            # Session features
+            df_out['vwap_dev_ticks_mean_1s'] = r1s['vwap_dev_ticks'].mean().fillna(0.0).round(6)
+            df_out['vpin_100_mean_1s'] = r1s['vpin_100'].mean().fillna(0.0).round(6)
             
             # Slice off the overlap part for writing
             overlap_len = len(last_overlap)
@@ -378,7 +400,7 @@ def aggregate_features_chunked(
             print(f"  Phase 4: {rows_proc:,} rows | Vectorized chunks processed.")
             
             # Clear memory
-            del chunk, df, df_out, write_df, is_exhaustion, r1s, r5s, r30s
+            del chunk, df, df_out, write_df, r1s, r5s, r30s
             gc.collect()
 
     stats["rows_processed"] = rows_proc

@@ -506,7 +506,8 @@ def run_phase4(date: str, out_dir: Path,
 
 
 def run_phase5(date: str, out_dir: Path,
-               cp: CheckpointManager, force: bool = False) -> tuple[bool, str]:
+               cp: CheckpointManager, force: bool = False,
+               trades_path: Path | None = None) -> tuple[bool, str]:
     features_path = out_dir / "features_dom.csv"
     agg_path = out_dir / "features_dom_agg.csv"
     sampled_path = out_dir / "sampled_events.csv"
@@ -514,14 +515,15 @@ def run_phase5(date: str, out_dir: Path,
         return False, "features or agg missing"
 
     if sentinel_done(out_dir, "p5_sample") and sampled_path.exists() and not force:
-        print("    [P5] Already done — SKIP")
+        print("    [P5] Already done -- SKIP")
         cp.set_phase(date, "p5_sample", PhaseStatus.DONE)
         return True, ""
 
     cp.set_phase(date, "p5_sample", PhaseStatus.RUNNING)
     print(f"    [P5] CUSUM sampling ...")
     t0 = time.time()
-    p5_stats = p5_sample(features_path, agg_path, sampled_path, percentile=5.0)
+    p5_stats = p5_sample(features_path, agg_path, sampled_path,
+                         percentile=5.0, trades_path=trades_path)
     elapsed = time.time() - t0
 
     # Strong fail-fast: zero samples means no output and no valid signal for P6→P7.
@@ -734,26 +736,38 @@ def process_day(
         if not ok:
             cp.finalize(date, "failed", err, time.time()-t0, 0)
             return "failed", err, time.time()-t0, 0
+        gc.collect()
 
         ok, err = run_phase4(date, out_dir, cp, force)
         if not ok:
             cp.finalize(date, "failed", err, time.time()-t0, 0)
             return "failed", err, time.time()-t0, 0
+        gc.collect()
 
-        ok, err = run_phase5(date, out_dir, cp, force)
+        ok, err = run_phase5(date, out_dir, cp, force, trades_path)
         if not ok:
             cp.finalize(date, "failed", err, time.time()-t0, 0)
             return "failed", err, time.time()-t0, 0
+        gc.collect()
 
         ok, err = run_phase6(date, out_dir, cp, force)
         if not ok:
             cp.finalize(date, "failed", err, time.time()-t0, 0)
             return "failed", err, time.time()-t0, 0
+        gc.collect()   # CRITICAL: ensures P6's 3.1GB sort arrays are freed before P7 subprocess allocates ~2.2GB
 
         ok, err = run_phase7(date, out_dir, cp, storage, force)
         if not ok:
             cp.finalize(date, "failed", err, time.time()-t0, 0)
             return "failed", err, time.time()-t0, 0
+
+        # Free snapshots.csv after P7 completes (both P6 and P7 need it during execution)
+        snaps = out_dir / "snapshots.csv"
+        if snaps.exists():
+            freed = snaps.stat().st_size / 1024**2
+            snaps.unlink()
+            print(f"    [GC] Deleted snapshots.csv ({freed:.0f}MB freed)")
+        gc.collect()
 
         runtime = time.time() - t0
         disk_final = disk_now()

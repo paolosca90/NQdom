@@ -21,6 +21,20 @@
 |----|------|---|-------|------|
 | #4621 | 5:05 PM | 🟣 | New P3→P7 orchestrator with direct module imports for real-time output | ~386 |
 | #4616 | 4:52 PM | 🟣 | Standalone P5-P7 orchestrator created with checkpoint resume | ~266 |
+
+### Apr 20, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #5994 | 10:11 PM | 🔵 | Original p8_5 evaluator blocked — p8_ml has not run for any date | ~424 |
+
+### Apr 21, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #6003 | 9:38 AM | 🟣 | P7 labeling now runs 21 candidates in 17 seconds after fix | ~236 |
+| #6002 | " | 🔴 | P7 labeling script now handles snapshots_fused.csv column name mismatch | ~219 |
+| #5997 | 9:35 AM | 🔵 | P7 labeling test failed - snapshots.csv path not found | ~212 |
 </claude-mem-context>
 
 # P7 — Triple-Barrier Labeling
