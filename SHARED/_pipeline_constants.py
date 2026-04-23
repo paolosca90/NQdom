@@ -9,6 +9,7 @@ Imported by: local_multiday_runner.py, vps_multiday_runner.py,
 # pt_ticks = profit target in ticks
 # sl_ticks = stop loss in ticks
 CANDIDATES = [
+    {"vb_ticks": 500,  "pt_ticks": 8.0,  "sl_ticks": 8.0,  "desc": "500t/8/8"},
     {"vb_ticks": 2000, "pt_ticks": 10.0, "sl_ticks": 10.0, "desc": "2000t/10/10"},
     {"vb_ticks": 4000, "pt_ticks": 20.0, "sl_ticks": 20.0, "desc": "4000t/20/20"},
     {"vb_ticks": 8000, "pt_ticks": 40.0, "sl_ticks": 40.0, "desc": "8000t/40/40"},
@@ -71,51 +72,54 @@ COST_BP_ES = 2              # ~2 ticks / $25 round-turn for ES
 # All feature column names expected from Phase 3 + Phase 4 + Phase 2b (TS features)
 # Updated Apr 2026 — aligned with DeepLOB NotebookLM architecture
 ALL_FEATURE_PATTERNS = [
-    # ── LOB imbalance ──────────────────────────────────────────────────────────
-    "imbalance_1", "imbalance_5", "imbalance_10",
-    "bid_depth_5", "ask_depth_5", "depth_ratio",
-    "bid_qty_1", "ask_qty_1",
-    # ── Stack / Pull (price-level queue dynamics) ──────────────────────────────
-    "stack_bid_1", "pull_bid_1",
-    "stack_bid_2", "pull_bid_2",
-    "stack_bid_3", "pull_bid_3",
-    "stack_bid_4", "pull_bid_4",
-    "stack_bid_5", "pull_bid_5",
-    "stack_ask_1", "pull_ask_1",
-    "stack_ask_2", "pull_ask_2",
-    "stack_ask_3", "pull_ask_3",
-    "stack_ask_4", "pull_ask_4",
-    "stack_ask_5", "pull_ask_5",
-    # ── Priority score / microprice ────────────────────────────────────────────
-    "ps_weighted_bid", "ps_weighted_ask", "ps_net_weighted", "ps_delta_L1",
-    "spread_ticks", "microprice", "mid_price_diff",
-    # ── Rolling stats (temporal aggregation P4) ────────────────────────────────
+    # ── Base price ─────────────────────────────────────────────────────────────
+    "spread", "mid_price", "microprice", "imbalance_1",
+    # ── Cumulative Delta (T&S-based) ───────────────────────────────────────────
+    "delta_50", "delta_100", "delta_200", "delta_500",
+    # ── Imbalance Trend ────────────────────────────────────────────────────────
+    "imb_trend_10", "imb_trend_50",
+    "imb_ma_ratio_10", "imb_ma_ratio_50",
+    # ── Microprice Momentum ────────────────────────────────────────────────────
+    "microprice_momentum_10", "microprice_momentum_50",
+    "microprice_dev_from_ma",
+    # ── Directional OFI ───────────────────────────────────────────────────────
+    "ps_delta_L1", "ofi_50", "ofi_100", "ofi_500",
+    # ── Stack Sweep ────────────────────────────────────────────────────────────
+    "stack_sweep_bid_flag", "stack_sweep_ask_flag", "stack_sweep_any_flag",
+    "bid_sweep_count", "ask_sweep_count",
+    # ── Session ────────────────────────────────────────────────────────────────
+    "vwap_dev_ticks", "vpin_100", "cum_delta_chunk",
+    # ── P4 Rolling aggregates (temporal) ──────────────────────────────────────
     "imbalance_mean_1s", "imbalance_std_1s",
     "imbalance_mean_5s", "imbalance_std_5s",
     "imbalance_mean_30s", "imbalance_std_30s",
-    "ps_net_weighted_mean_1s", "ps_net_weighted_mean_5s", "ps_net_weighted_mean_30s",
-    "pull_bid_1_sum_1s", "stack_bid_1_sum_1s",
-    "pull_ask_1_sum_1s", "stack_ask_1_sum_1s",
+    "delta_50_mean_1s", "delta_50_std_1s",
+    "delta_100_mean_1s", "delta_100_std_1s",
+    "delta_200_mean_1s", "delta_200_std_1s",
+    "imb_trend_10_mean_1s", "imb_trend_50_mean_1s",
+    "imb_ma_ratio_10_mean_1s", "imb_ma_ratio_50_mean_1s",
+    "microprice_momentum_10_mean_1s", "microprice_momentum_50_mean_1s",
+    "microprice_dev_from_ma_mean_1s",
+    "ofi_50_mean_1s", "ofi_100_mean_1s", "ofi_500_mean_1s",
     "ps_delta_L1_mean_1s", "ps_delta_L1_mean_5s", "ps_delta_L1_mean_30s",
-    "update_rate_1s", "queue_exhaustion_1s",
-    # ── NEW: Time & Sales / Order Flow features (P2b) ────────────────────────
-    # Delta decomposition: ΔL (limit new), ΔC (cancel/spoof), ΔM (market order)
-    "delta_L", "delta_C", "delta_M",
-    "delta_L_1s", "delta_C_1s", "delta_M_1s",
-    "delta_L_5s", "delta_C_5s", "delta_M_5s",
-    # Stacked imbalance: institutional aggression across 3+ consecutive levels (≥300%)
-    "stacked_imbalance_bid_3", "stacked_imbalance_ask_3",
-    "stacked_imbalance_bid_5", "stacked_imbalance_ask_5",
-    # Volume sequencing: strictly increasing T&S volume across price levels
-    "volume_sequence_bid", "volume_sequence_ask",
-    # Bid/Ask fade: volume diminishes across top/bottom 3 levels at extreme
-    "bid_fade_3", "ask_fade_3",
-    # Exhaustion: zero volume at bar high/low (red/green candle)
-    "exhaustion_bid", "exhaustion_ask",
-    # Unfinished business: non-zero volume at new high/low (auction must return)
-    "unfinished_business_bid", "unfinished_business_ask",
-    # Closing delta extremes: closing delta ≥95% of max/min delta (momentum)
-    "closing_delta_extreme_bid", "closing_delta_extreme_ask",
-    # TICK Z-score: NYSE TICK index Z-score for market exhaustion filter (±2.5)
-    "tick_zscore",
+    "stack_sweep_bid_flag_sum_1s", "stack_sweep_ask_flag_sum_1s",
+    "stack_sweep_any_flag_sum_1s",
+    "bid_sweep_count_mean_1s", "ask_sweep_count_mean_1s",
+    "vwap_dev_ticks_mean_1s", "vpin_100_mean_1s",
+    # ── P5 session delta features ──────────────────────────────────────────────
+    "cum_delta_session", "delta_rolling_sum_5", "delta_rolling_sum_30",
+    # ── OFI multi-livello (Kolm, Turiel & Westray 2023) ─────────────────────
+    "ofi_L1", "ofi_L2", "ofi_L3", "ofi_L4", "ofi_L5",
+    "ofi_L1_mean_1s", "ofi_L2_mean_1s", "ofi_L3_mean_1s",
+    "ofi_L4_mean_1s", "ofi_L5_mean_1s",
+    # ── Queue Imbalance per livello ──────────────────────────────────────────
+    "qi_L1", "qi_L2", "qi_L3", "qi_L4", "qi_L5",
+    "qi_L1_mean_1s", "qi_L2_mean_1s", "qi_L3_mean_1s",
+    "qi_L4_mean_1s", "qi_L5_mean_1s",
+    "qi_L1_mean_5s", "qi_L2_mean_5s",
+    # ── Volatilità microprice ────────────────────────────────────────────────
+    "microprice_vol_20", "microprice_vol_100",
+    "microprice_vol_20_mean_1s", "microprice_vol_100_mean_1s",
+    # ── Add/Cancel activity ratio ────────────────────────────────────────────
+    "add_cancel_ratio_1s",
 ]

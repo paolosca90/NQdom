@@ -73,6 +73,7 @@ for d in pycache:
     for f in glob.glob(os.path.join(d, "numba_*")):
         try: os.remove(f)
         except: pass
+    HAS_NUMBA = False   # numba cache was corrupted — disable JIT
     def njit(*args, **kwargs):
         def decorator(f):
             return f

@@ -43,7 +43,28 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from numba import njit, prange
+
+# Try numba — fallback to pure-numpy if unavailable or disabled via env.
+# On Windows, numba import can hang indefinitely due to cache corruption.
+# The fallback makes njit a no-op and prange = range, so the kernel
+# runs as plain Python (slower but correct).
+try:
+    from numba import njit, prange
+    HAS_NUMBA = True if __import__("os").environ.get("P7_NO_JIT", "0") != "1" else False
+    if not HAS_NUMBA:
+        raise ImportError("P7_NO_JIT=1 — numba disabled via env var")
+except (ImportError, ModuleNotFoundError):
+    HAS_NUMBA = False
+
+    def njit(*args, **kwargs):
+        """No-op decorator — function runs as plain Python."""
+        def decorator(f):
+            return f
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
+
+    prange = range
 
 # -- import the single authorized source for label filename construction ---------
 sys.path.insert(0, str(Path(__file__).parent.parent / "SHARED"))
@@ -356,19 +377,23 @@ def main():
     leaderboard = []
 
     # PERF: pre-trigger numba JIT compilation with dummy arrays to avoid
-    # paying compilation cost during first real candidate
-    print("[JIT] Warming up numba cache (Tick Clock mode) ...", end=" ", flush=True)
-    _t_jit = time.time()
-    _dummy_ts   = np.array([0, 1_000_000_000, 2_000_000_000], dtype=np.int64)
-    _dummy_mid  = np.array([100.0, 100.25, 99.75], dtype=np.float64)
-    _dummy_si   = np.array([0], dtype=np.int64)
-    _dummy_ei   = np.array([3], dtype=np.int64)
-    _dummy_pt   = np.array([101.0], dtype=np.float64)
-    _dummy_sl   = np.array([99.0],  dtype=np.float64)
-    _numba_first_touch_scan_tick(
-        _dummy_ts, _dummy_mid, _dummy_si, _dummy_ei, _dummy_pt, _dummy_sl
-    )
-    print(f"done ({time.time()-_t_jit:.1f}s)")
+    # paying compilation cost during first real candidate.
+    # Skip entirely when numba is unavailable (HAS_NUMBA=False) or disabled.
+    if HAS_NUMBA:
+        print("[JIT] Warming up numba cache (Tick Clock mode) ...", end=" ", flush=True)
+        _t_jit = time.time()
+        _dummy_ts   = np.array([0, 1_000_000_000, 2_000_000_000], dtype=np.int64)
+        _dummy_mid  = np.array([100.0, 100.25, 99.75], dtype=np.float64)
+        _dummy_si   = np.array([0], dtype=np.int64)
+        _dummy_ei   = np.array([3], dtype=np.int64)
+        _dummy_pt   = np.array([101.0], dtype=np.float64)
+        _dummy_sl   = np.array([99.0],  dtype=np.float64)
+        _numba_first_touch_scan_tick(
+            _dummy_ts, _dummy_mid, _dummy_si, _dummy_ei, _dummy_pt, _dummy_sl
+        )
+        print(f"done ({time.time()-_t_jit:.1f}s)")
+    else:
+        print("[JIT] Numba unavailable — kernel will run as pure Python (no JIT warmup)")
 
     for i, row in enumerate(candidates, 1):
         if "vb_ticks" in row:

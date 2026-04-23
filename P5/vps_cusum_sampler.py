@@ -36,41 +36,19 @@ except ImportError:
 
 PHASE3_FIELDS = [
     "ts",
-    "spread_ticks", "microprice", "mid_price_diff",
-    "imbalance_1", "imbalance_5", "imbalance_10",
-    "bid_depth_5", "ask_depth_5", "depth_ratio",
-    "bid_qty_1", "ask_qty_1",
-    "stack_bid_1", "pull_bid_1",
-    "stack_bid_2", "pull_bid_2",
-    "stack_bid_3", "pull_bid_3",
-    "stack_bid_4", "pull_bid_4",
-    "stack_bid_5", "pull_bid_5",
-    "stack_ask_1", "pull_ask_1",
-    "stack_ask_2", "pull_ask_2",
-    "stack_ask_3", "pull_ask_3",
-    "stack_ask_4", "pull_ask_4",
-    "stack_ask_5", "pull_ask_5",
-    "ps_weighted_bid", "ps_weighted_ask", "ps_net_weighted", "ps_delta_L1",
-    # Microstructural + flow features (added P3 update)
-    "actual_depth_bid_Xi", "actual_depth_ask_Xi",
-    "flow_limit_add_bid_L1", "flow_cancellation_bid_L1", "flow_market_sell_L1",
-    "flow_limit_add_ask_L1", "flow_cancellation_ask_L1", "flow_market_buy_L1",
-    "flow_limit_add_bid_5", "flow_cancellation_bid_5",
-    "flow_limit_add_ask_5", "flow_cancellation_ask_5",
-    # NEW order flow features (from P2b T&S fusion)
-    "delta_raw", "cum_delta_chunk", "delta_sign",
-    # T&S enrichment: trade attached to each sampled event via merge_asof
-    "trade_side", "trade_size", "trade_delta",
-    "cum_trade_delta_session",
-    # Diagonal Stacked Imbalances
-    "stacked_imb_ask", "stacked_imb_bid", "stacked_imb_score",
-    "stacked_imb_flag_ask", "stacked_imb_flag_bid",
-    # Exhaustion / Thin Prints
-    "exhaustion_ask_thin", "exhaustion_bid_thin",
-    "exhaustion_ask_zero", "exhaustion_bid_zero", "exhaustion_ratio",
-    # LOB Spatial Density (improved)
-    "lob_max_gap_bid", "lob_max_gap_ask",
-    "lob_vacuum_count_bid", "lob_vacuum_count_ask", "lob_vacuum_score",
+    "spread", "mid_price", "microprice", "imbalance_1",
+    "delta_50", "delta_100", "delta_200", "delta_500",
+    "imb_trend_10", "imb_trend_50",
+    "imb_ma_ratio_10", "imb_ma_ratio_50",
+    "microprice_momentum_10", "microprice_momentum_50",
+    "microprice_dev_from_ma",
+    "ps_delta_L1", "ofi_50", "ofi_100", "ofi_500",
+    "stack_sweep_bid_flag", "stack_sweep_ask_flag", "stack_sweep_any_flag",
+    "bid_sweep_count", "ask_sweep_count",
+    "vwap_dev_ticks", "vpin_100", "cum_delta_chunk",
+    "ofi_L1", "ofi_L2", "ofi_L3", "ofi_L4", "ofi_L5",
+    "qi_L1", "qi_L2", "qi_L3", "qi_L4", "qi_L5",
+    "microprice_vol_20", "microprice_vol_100",
 ]
 
 PROGRESS_EVERY = 200_000
@@ -487,12 +465,13 @@ def cusum_sample(
         # P2b T&S fix: compute TRUE cumulative delta across chunks
         # cum_delta_chunk in P3 MOMENTUM resets at each 250K-row chunk boundary.
         # We track the TRUE session-long cumulative delta.
-        dr_vals = pd.to_numeric(df_merged['cum_delta_chunk'], errors='coerce').fillna(0.0).values
-        dr_cumsum = np.cumsum(dr_vals)          # cumsum within this chunk
-        # cum_delta_session = delta from session start up to each row in this chunk
-        cum_delta_session = prev_cum_delta + dr_cumsum
-        # Update carry-forward for next chunk
-        prev_cum_delta = prev_cum_delta + dr_cumsum[-1]  # add chunk's net delta
+        # cum_delta_chunk è già una cumulativa nel chunk — diff() per ottenere il delta per-snapshot
+        cum_delta_raw = pd.to_numeric(df_merged['cum_delta_chunk'], errors='coerce').fillna(0.0).values
+        # delta per-snapshot: differenza consecutiva (il primo elemento usa il carry-forward)
+        dr_vals = np.diff(cum_delta_raw, prepend=0.0).astype(np.float64)
+        # cumsum dei delta per-snapshot = cum_delta reale dall'inizio sessione
+        cum_delta_session = prev_cum_delta + np.cumsum(dr_vals)
+        prev_cum_delta = float(cum_delta_session[-1])
 
         # Run CUSUM filter -- returns boolean mask of emitted rows
         emit_mask, _ = cusum_filter(mid_deltas, h)

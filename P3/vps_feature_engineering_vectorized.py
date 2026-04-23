@@ -91,6 +91,7 @@ def compute_features_vectorized(
     b1_plus_a1 = bid_qty_1 + ask_qty_1
     imbalance_1 = np.where(b1_plus_a1 > 0, (bid_qty_1 - ask_qty_1) / b1_plus_a1, 0.0).astype(np.float32)
     result['imbalance_1'] = imbalance_1
+    # DEPRECATED — replaced by qi_L1 (output_cols removed, still used internally for imb_trend/imb_ma_ratio)
 
     # ── T&S-based trade delta (EXCLUSIVE source for trade classification) ─────────
     # traded_vol_ask = cumulative buy volume (from T&S via P2b merge_asof)
@@ -104,8 +105,13 @@ def compute_features_vectorized(
     tsv_sell = to_float32_arr(working_df['traded_vol_bid'])
 
     # Per-snapshot signed delta (diff of cumulative volumes)
+    # Cross-chunk: carry last value of previous chunk to fill the gap at row 0
     delta_vol_buy  = np.zeros(n_rows, dtype=np.float32)
     delta_vol_sell = np.zeros(n_rows, dtype=np.float32)
+    prev_tsv_buy   = state.get('prev_tsv_buy',  float(tsv_buy[0]))  if state else float(tsv_buy[0])
+    prev_tsv_sell  = state.get('prev_tsv_sell', float(tsv_sell[0])) if state else float(tsv_sell[0])
+    delta_vol_buy[0]   = max(0.0, float(tsv_buy[0])  - prev_tsv_buy)
+    delta_vol_sell[0]  = max(0.0, float(tsv_sell[0]) - prev_tsv_sell)
     delta_vol_buy[1:]  = tsv_buy[1:]  - tsv_buy[:-1]
     delta_vol_sell[1:] = tsv_sell[1:] - tsv_sell[:-1]
     # Clip negative diffs (book rebuilt between snapshots → zero contribution)
@@ -175,6 +181,27 @@ def compute_features_vectorized(
     # This is a MBO DOM spatial feature (not trade classification)
     ps_delta_L1 = (stack_bid[:, 0] - pull_bid[:, 0]) - (stack_ask[:, 0] - pull_ask[:, 0])
     result['ps_delta_L1'] = ps_delta_L1.astype(np.float32)
+    # DEPRECATED — replaced by ofi_L1 (output_cols removed, still used internally for ofi_50/100/500)
+
+    # ── OFI multi-livello L1-L5 (Kolm, Turiel & Westray 2023) ─────────────
+    for i in range(5):
+        ofi_Li = ((stack_bid[:, i] - pull_bid[:, i]) -
+                   (stack_ask[:, i] - pull_ask[:, i])).astype(np.float32)
+        result[f'ofi_L{i+1}'] = ofi_Li
+
+    # ── Queue Imbalance per livello L1-L5 (arXiv 2509.22985) ───────────────
+    for i in range(5):
+        total_Li = bid_qty_vals[:, i] + ask_qty_vals[:, i]
+        result[f'qi_L{i+1}'] = np.where(
+            total_Li > 0,
+            (bid_qty_vals[:, i] - ask_qty_vals[:, i]) / total_Li,
+            0.0
+        ).astype(np.float32)
+
+    # ── Volatilità realizzata del microprice (regime detector) ──────────────
+    mp_series_vol = pd.Series(microprice)
+    result['microprice_vol_20']  = mp_series_vol.rolling(20,  min_periods=1).std().fillna(0.0).values.astype(np.float32)
+    result['microprice_vol_100'] = mp_series_vol.rolling(100, min_periods=1).std().fillna(0.0).values.astype(np.float32)
 
     # ── T&S-based agg already set above (agg_buy, agg_sell from traded_vol) ─────
 
@@ -242,6 +269,8 @@ def compute_features_vectorized(
         'cum_pv':  state['cum_pv']  + net_chunk_pv,
         'prev_bid_qty_row': last_bid_row,
         'prev_ask_qty_row': last_ask_row,
+        'prev_tsv_buy':  float(tsv_buy[-1]),
+        'prev_tsv_sell': float(tsv_sell[-1]),
     }
 
     # ── VPIN proxy (keep — known volume-synchronization feature) ───────────────
@@ -263,7 +292,6 @@ def compute_features_vectorized(
         # Price
         'spread', 'mid_price', 'microprice',
         # L1 base
-        'imbalance_1',
         # ── NEW: Cumulative Delta ──────────────────────────────────────────────
         'delta_50', 'delta_100', 'delta_200', 'delta_500',
         # ── NEW: Imbalance Trend ──────────────────────────────────────────────
@@ -273,11 +301,16 @@ def compute_features_vectorized(
         'microprice_momentum_10', 'microprice_momentum_50',
         'microprice_dev_from_ma',
         # ── NEW: Directional OFI ───────────────────────────────────────────────
-        'ps_delta_L1',
         'ofi_50', 'ofi_100', 'ofi_500',
         # ── NEW: Stack Sweep ───────────────────────────────────────────────────
         'stack_sweep_bid_flag', 'stack_sweep_ask_flag', 'stack_sweep_any_flag',
         'bid_sweep_count', 'ask_sweep_count',
+        # OFI multi-livello
+        'ofi_L1', 'ofi_L2', 'ofi_L3', 'ofi_L4', 'ofi_L5',
+        # Queue Imbalance per livello
+        'qi_L1', 'qi_L2', 'qi_L3', 'qi_L4', 'qi_L5',
+        # Volatilità microprice
+        'microprice_vol_20', 'microprice_vol_100',
         # Session
         'vwap_dev_ticks', 'vpin_100', 'cum_delta_chunk',
     ]

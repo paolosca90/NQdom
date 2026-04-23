@@ -54,19 +54,20 @@ PROGRESS_EVERY = 100_000
 # Updated Apr 2026 for MOMENTUM feature set (P3 rebuild)
 NEEDED_COLS = [
     'ts',
-    'imbalance_1',
     'delta_50', 'delta_100', 'delta_200',
     'imb_trend_10', 'imb_trend_50',
     'imb_ma_ratio_10', 'imb_ma_ratio_50',
     'microprice_momentum_10', 'microprice_momentum_50',
     'microprice_dev_from_ma',
-    'ps_delta_L1',
     'ofi_50', 'ofi_100', 'ofi_500',
     'stack_sweep_bid_flag', 'stack_sweep_ask_flag',
     'stack_sweep_any_flag',
     'bid_sweep_count', 'ask_sweep_count',
     'vwap_dev_ticks',
     'vpin_100',
+    'ofi_L1', 'ofi_L2', 'ofi_L3', 'ofi_L4', 'ofi_L5',
+    'qi_L1', 'qi_L2', 'qi_L3', 'qi_L4', 'qi_L5',
+    'microprice_vol_20', 'microprice_vol_100',
 ]
 
 # ---------------------------------------------------------------------------
@@ -75,10 +76,6 @@ NEEDED_COLS = [
 
 AGG_FEATURE_FIELDS = [
     "ts",
-    # Imbalance rolling stats
-    "imbalance_mean_1s", "imbalance_std_1s",
-    "imbalance_mean_5s", "imbalance_std_5s",
-    "imbalance_mean_30s", "imbalance_std_30s",
     # Cumulative delta rolling stats
     "delta_50_mean_1s", "delta_50_std_1s",
     "delta_100_mean_1s", "delta_100_std_1s",
@@ -91,7 +88,6 @@ AGG_FEATURE_FIELDS = [
     "microprice_dev_from_ma_mean_1s",
     # OFI rolling
     "ofi_50_mean_1s", "ofi_100_mean_1s", "ofi_500_mean_1s",
-    "ps_delta_L1_mean_1s", "ps_delta_L1_mean_5s", "ps_delta_L1_mean_30s",
     # Sweep rolling (boolean flags)
     "stack_sweep_bid_flag_sum_1s", "stack_sweep_ask_flag_sum_1s",
     "stack_sweep_any_flag_sum_1s",
@@ -99,6 +95,17 @@ AGG_FEATURE_FIELDS = [
     # Session features
     "vwap_dev_ticks_mean_1s",
     "vpin_100_mean_1s",
+    # OFI multi-livello rolling 1s
+    "ofi_L1_mean_1s", "ofi_L2_mean_1s", "ofi_L3_mean_1s",
+    "ofi_L4_mean_1s", "ofi_L5_mean_1s",
+    # Queue Imbalance rolling
+    "qi_L1_mean_1s", "qi_L2_mean_1s", "qi_L3_mean_1s",
+    "qi_L4_mean_1s", "qi_L5_mean_1s",
+    "qi_L1_mean_5s", "qi_L2_mean_5s",
+    # Volatilità microprice rolling
+    "microprice_vol_20_mean_1s", "microprice_vol_100_mean_1s",
+    # Add/Cancel activity ratio
+    "add_cancel_ratio_1s",
 ]
 
 
@@ -332,14 +339,6 @@ def aggregate_features_chunked(
             df_out['ts'] = (df.index.hour * 3600_000 + df.index.minute * 60_000 +
                             df.index.second * 1_000 + df.index.microsecond // 1_000)
 
-            # Imbalance rolling stats
-            df_out['imbalance_mean_1s'] = r1s['imbalance_1'].mean().fillna(0.0).round(6)
-            df_out['imbalance_std_1s'] = r1s['imbalance_1'].std().fillna(0.0).round(6)
-            df_out['imbalance_mean_5s'] = r5s['imbalance_1'].mean().fillna(0.0).round(6)
-            df_out['imbalance_std_5s'] = r5s['imbalance_1'].std().fillna(0.0).round(6)
-            df_out['imbalance_mean_30s'] = r30s['imbalance_1'].mean().fillna(0.0).round(6)
-            df_out['imbalance_std_30s'] = r30s['imbalance_1'].std().fillna(0.0).round(6)
-
             # Cumulative delta rolling stats
             df_out['delta_50_mean_1s'] = r1s['delta_50'].mean().fillna(0.0).round(6)
             df_out['delta_50_std_1s'] = r1s['delta_50'].std().fillna(0.0).round(6)
@@ -364,11 +363,6 @@ def aggregate_features_chunked(
             df_out['ofi_100_mean_1s'] = r1s['ofi_100'].mean().fillna(0.0).round(6)
             df_out['ofi_500_mean_1s'] = r1s['ofi_500'].mean().fillna(0.0).round(6)
 
-            # PS delta rolling
-            df_out['ps_delta_L1_mean_1s'] = r1s['ps_delta_L1'].mean().fillna(0.0).round(6)
-            df_out['ps_delta_L1_mean_5s'] = r5s['ps_delta_L1'].mean().fillna(0.0).round(6)
-            df_out['ps_delta_L1_mean_30s'] = r30s['ps_delta_L1'].mean().fillna(0.0).round(6)
-
             # Sweep rolling (boolean flags)
             df_out['stack_sweep_bid_flag_sum_1s'] = r1s['stack_sweep_bid_flag'].sum().fillna(0).astype(int)
             df_out['stack_sweep_ask_flag_sum_1s'] = r1s['stack_sweep_ask_flag'].sum().fillna(0).astype(int)
@@ -379,7 +373,45 @@ def aggregate_features_chunked(
             # Session features
             df_out['vwap_dev_ticks_mean_1s'] = r1s['vwap_dev_ticks'].mean().fillna(0.0).round(6)
             df_out['vpin_100_mean_1s'] = r1s['vpin_100'].mean().fillna(0.0).round(6)
-            
+
+            # OFI multi-livello rolling 1s
+            for i in range(1, 6):
+                col = f'ofi_L{i}'
+                if col in df.columns:
+                    df_out[f'ofi_L{i}_mean_1s'] = r1s[col].mean().fillna(0.0).round(6)
+                else:
+                    df_out[f'ofi_L{i}_mean_1s'] = 0.0
+
+            # Queue Imbalance rolling
+            for i in range(1, 6):
+                col = f'qi_L{i}'
+                if col in df.columns:
+                    df_out[f'qi_L{i}_mean_1s'] = r1s[col].mean().fillna(0.0).round(6)
+                else:
+                    df_out[f'qi_L{i}_mean_1s'] = 0.0
+            for i in range(1, 3):
+                col = f'qi_L{i}'
+                if col in df.columns:
+                    df_out[f'qi_L{i}_mean_5s'] = r5s[col].mean().fillna(0.0).round(6)
+                else:
+                    df_out[f'qi_L{i}_mean_5s'] = 0.0
+
+            # Volatilità microprice rolling
+            for col, out_col in [('microprice_vol_20', 'microprice_vol_20_mean_1s'),
+                                  ('microprice_vol_100', 'microprice_vol_100_mean_1s')]:
+                if col in df.columns:
+                    df_out[out_col] = r1s[col].mean().fillna(0.0).round(6)
+                else:
+                    df_out[out_col] = 0.0
+
+            # Add/Cancel activity ratio
+            if 'stack_sweep_bid_flag' in df.columns and 'bid_sweep_count' in df.columns:
+                add_p    = r1s['stack_sweep_bid_flag'].sum() + r1s['stack_sweep_ask_flag'].sum()
+                cancel_p = r1s['bid_sweep_count'].mean()     + r1s['ask_sweep_count'].mean()
+                df_out['add_cancel_ratio_1s'] = (add_p / (cancel_p + 1e-9)).fillna(1.0).round(6)
+            else:
+                df_out['add_cancel_ratio_1s'] = 1.0
+
             # Slice off the overlap part for writing
             overlap_len = len(last_overlap)
             write_df = df_out.iloc[overlap_len:]

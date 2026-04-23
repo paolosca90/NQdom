@@ -139,50 +139,49 @@ def load_trades(trades_path: Path):
 
 
 def fuse_chunk(snap_chunk: pd.DataFrame, trades_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Effettua l'asof merge guardando al PASSATO (direction='backward') per
-    eliminare ogni possibile simulation-to-reality gap o data leakage.
-    I trades vengono prima cumulati, e al tempo T associamo l'ultimo stato
-    del cumulativo <= T. Calcolando le differenze, otteniamo il volume
-    esatto scambiato nello step intercorso senza mai guardare al futuro.
-    """
-    # Cast timestamp LOB
-    ts_str = snap_chunk['ts'].str.replace(" UTC", "", regex=False)
-    snap_chunk['ts_dt'] = pd.to_datetime(ts_str, format='mixed', utc=False)
-    
-    # 1. Precomputiamo i volumi cumulativi
+    chunk = snap_chunk.copy()
+    ts_str = chunk['ts'].str.replace(" UTC", "", regex=False)
+    chunk['ts_dt'] = pd.to_datetime(ts_str, format='mixed', utc=False)
+
     t_sell = trades_df[trades_df['side'].str.lower() == 'sell'].copy()
     t_buy  = trades_df[trades_df['side'].str.lower() == 'buy'].copy()
-    
-    # Evitiamo time duplicati aggregandoli prima del cumulativo
+
     t_sell = t_sell.groupby('ts_dt')['size'].sum().reset_index()
     t_buy  = t_buy.groupby('ts_dt')['size'].sum().reset_index()
-    
+
     t_sell['cum_sell'] = t_sell['size'].cumsum()
     t_buy['cum_buy']   = t_buy['size'].cumsum()
 
-    # 2. AsOf Merge BACKWARD rispetto allo snapshot (solo i trades ESATTAMENTE <= T)
-    # merge_asof richiede ESPLICITAMENTE che entrambi i DataFrame siano sortati per la chiave
-    # e che non contengano null — drop null ts da snap_ref prima del merge
-    snap_ref = snap_chunk[['ts_dt']].copy().dropna(subset=['ts_dt']).sort_values('ts_dt').reset_index(drop=True)
+    snap_sorted = chunk[['ts_dt']].sort_values('ts_dt').reset_index()
+    orig_index  = snap_sorted['index']
+
     t_sell_sorted = t_sell[['ts_dt', 'cum_sell']].sort_values('ts_dt').reset_index(drop=True)
-    t_buy_sorted = t_buy[['ts_dt', 'cum_buy']].sort_values('ts_dt').reset_index(drop=True)
+    t_buy_sorted  = t_buy[['ts_dt', 'cum_buy']].sort_values('ts_dt').reset_index(drop=True)
 
-    # Mergiamo il cum_sell
-    merged_s = pd.merge_asof(snap_ref, t_sell_sorted, on='ts_dt', direction='backward')
-    merged_s['cum_sell'] = merged_s['cum_sell'].ffill().fillna(0.0)
+    merged_s = pd.merge_asof(snap_sorted[['ts_dt']], t_sell_sorted, on='ts_dt', direction='backward')
+    merged_b = pd.merge_asof(snap_sorted[['ts_dt']], t_buy_sorted,  on='ts_dt', direction='backward')
 
-    # Mergiamo il cum_buy
-    merged_b = pd.merge_asof(snap_ref, t_buy_sorted, on='ts_dt', direction='backward')
-    merged_b['cum_buy'] = merged_b['cum_buy'].ffill().fillna(0.0)
-    
-    # 3. Differenziamo i cumulativi per trovare lo snap esatto (Delta M)
-    snap_chunk['traded_vol_bid'] = merged_s['cum_sell'].diff().fillna(merged_s['cum_sell'].iloc[0])
-    snap_chunk['traded_vol_ask'] = merged_b['cum_buy'].diff().fillna(merged_b['cum_buy'].iloc[0])
-    
-    # Drop ts_dt tmp col
-    snap_chunk = snap_chunk.drop(columns=['ts_dt'])
-    return snap_chunk
+    cum_sell = merged_s['cum_sell'].ffill().fillna(0.0).values
+    cum_buy  = merged_b['cum_buy'].ffill().fillna(0.0).values
+
+    # delta per-snapshot: diff rispetto al valore precedente NELLA SEQUENZA TEMPORALE
+    # Il primo valore del chunk è 0 (delta ignoto al confine — safe default)
+    vol_bid = np.zeros(len(cum_sell), dtype=np.float64)
+    vol_ask = np.zeros(len(cum_buy),  dtype=np.float64)
+    vol_bid[1:] = np.maximum(0.0, cum_sell[1:] - cum_sell[:-1])
+    vol_ask[1:] = np.maximum(0.0, cum_buy[1:]  - cum_buy[:-1])
+
+    # Riallinea all'indice originale del chunk (non all'ordine temporale)
+    result_df = pd.DataFrame({
+        'orig_index': orig_index.values,
+        'traded_vol_bid': vol_bid,
+        'traded_vol_ask': vol_ask,
+    }).set_index('orig_index').reindex(chunk.index).fillna(0.0)
+
+    chunk['traded_vol_bid'] = result_df['traded_vol_bid'].values
+    chunk['traded_vol_ask'] = result_df['traded_vol_ask'].values
+    chunk = chunk.drop(columns=['ts_dt'])
+    return chunk
 
 
 def main():

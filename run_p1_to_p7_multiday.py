@@ -59,6 +59,7 @@ from P6.vps_excursion_analysis_vectorized import (
     plot_distributions as p6_plot,
 )
 from P2b.vps_phase2b_data_fusion import load_trades as p2b_load_trades, fuse_chunk as p2b_fuse_chunk
+from SHARED._pipeline_constants import CANDIDATES
 
 # Fix Unicode output on Windows console (cp1252 can't encode arrows/emoji)
 import io
@@ -73,7 +74,7 @@ OUTPUT_DIR_DEFAULT = _root / "output"
 PHASE_NAMES = [
     "p1_parse", "p2_reconstruct", "p2b_fusion",
     "p3_features", "p4_agg", "p5_sample", "p6_excursion",
-    "p7_c1", "p7_c2", "p7_c3",
+    *[f"p7_c{i}" for i in range(1, len(CANDIDATES) + 1)],
 ]
 
 DISK_FREE_WARNING_GB  = 20.0
@@ -88,13 +89,6 @@ EST_DISK_PER_DAY_BYTES = {
     "excursion_stats": 15 * (1024**2),
     "labels":          3 * (1024**2),
 }
-
-CANDIDATES = [
-    {"vb_ticks": 2000, "pt_ticks": 10.0, "sl_ticks": 10.0, "desc": "2000t/10/10"},
-    {"vb_ticks": 4000, "pt_ticks": 20.0, "sl_ticks": 20.0, "desc": "4000t/20/20"},
-    {"vb_ticks": 8000, "pt_ticks": 40.0, "sl_ticks": 40.0, "desc": "8000t/40/40"},
-]
-
 
 # ── enums ─────────────────────────────────────────────────────────────────────
 
@@ -309,7 +303,7 @@ def _cand_label_name(c: dict) -> str:
 def run_phase1(date: str, depth_path: Path, out_dir: Path,
                 cp: CheckpointManager, force: bool = False) -> tuple[bool, str]:
     events_path = out_dir / "events.csv"
-    if sentinel_done(out_dir, "p1_parse") and events_path.exists() and not force:
+    if sentinel_done(out_dir, "p1_parse") and events_path.exists():
         print("    [P1] Already done — SKIP")
         cp.set_phase(date, "p1_parse", PhaseStatus.DONE)
         return True, ""
@@ -340,7 +334,7 @@ def run_phase2(date: str, out_dir: Path,
     if not events_path.exists():
         return False, "events.csv missing"
 
-    if sentinel_done(out_dir, "p2_reconstruct") and snapshots_path.exists() and not force:
+    if sentinel_done(out_dir, "p2_reconstruct") and snapshots_path.exists():
         print("    [P2] Already done — SKIP")
         cp.set_phase(date, "p2_reconstruct", PhaseStatus.DONE)
         return True, ""
@@ -635,8 +629,8 @@ def run_phase7(date: str, out_dir: Path,
     if not excursion_path.exists():
         return False, "excursion_stats.csv missing"
 
-    # Build 3-candidate grid file
-    grid_path = out_dir / "_candidates_3.csv"
+    # Build N-candidate grid file
+    grid_path = out_dir / f"_candidates_{len(CANDIDATES)}.csv"
     with open(grid_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["vb_ticks", "pt_ticks", "sl_ticks"])
         w.writeheader()
@@ -651,12 +645,12 @@ def run_phase7(date: str, out_dir: Path,
         p7_phase = f"p7_c{i}"
 
         if sentinel_done(out_dir, p7_phase) and label_path.exists() and not force:
-            print(f"    [P7-{i}/3] {c['desc']} — SKIP (exists)")
+            print(f"    [P7-{i}/{len(CANDIDATES)}] {c['desc']} — SKIP (exists)")
             labels_ok += 1
             continue
 
         cp.set_phase(date, p7_phase, PhaseStatus.RUNNING)
-        print(f"    [P7-{i}/3] {c['desc']} ...")
+        print(f"    [P7-{i}/{len(CANDIDATES)}] {c['desc']} ...")
         t0 = time.time()
         cmd = [
             sys.executable,
@@ -666,26 +660,34 @@ def run_phase7(date: str, out_dir: Path,
             "--refprice", str(excursion_path),
             "--grid", str(grid_path),
             "--output", str(out_dir),
-            "--candidates", str(i),
+            "--candidates", str(len(CANDIDATES)),
         ]
         if force:
             cmd.append("--force")
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        # Propagate numba disable flag to P7 subprocess.
+        # On Windows, numba import can hang indefinitely due to cache corruption.
+        # P7/vps_phase7_labeling.py checks P7_NO_JIT env var at import time.
+        env = {**os.environ}
+        if os.environ.get("P6_NO_JIT") == "1" or os.environ.get("P7_NO_JIT") == "1":
+            env["P7_NO_JIT"] = "1"
+        elif os.environ.get("NUMBA_DISABLE_JIT") == "1":
+            env["P7_NO_JIT"] = "1"
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
         elapsed = time.time() - t0
 
         if r.returncode == 0 and label_path.exists():
             write_sentinel(out_dir, p7_phase)
             cp.set_phase(date, p7_phase, PhaseStatus.DONE)
             sz = label_path.stat().st_size / (1024**2)
-            print(f"    [P7-{i}/3] {c['desc']} ({sz:.1f}MB) in {elapsed:.0f}s — DONE")
+            print(f"    [P7-{i}/{len(CANDIDATES)}] {c['desc']} ({sz:.1f}MB) in {elapsed:.0f}s — DONE")
             labels_ok += 1
         else:
             msg = r.stderr[:200] if r.stderr else "label file not produced"
             write_sentinel(out_dir, p7_phase, "failed", msg)
             cp.set_phase(date, p7_phase, PhaseStatus.FAILED, msg)
-            print(f"    [P7-{i}/3] {c['desc']} — FAILED: {msg}")
+            print(f"    [P7-{i}/{len(CANDIDATES)}] {c['desc']} — FAILED: {msg}")
 
-    all_ok = labels_ok == 3
+    all_ok = labels_ok == len(CANDIDATES)
     if all_ok:
         write_sentinel(out_dir, "p7_labels")
     return all_ok, "" if all_ok else f"Only {labels_ok}/3 candidates labeled"
@@ -859,7 +861,7 @@ Examples:
             d for d, dp, tp, sz in days_info
             if not all(
                 sentinel_done(output_dir / d, f"p7_c{i}")
-                for i in range(1, 4)
+                for i in range(1, len(CANDIDATES) + 1)
             )
         ]
         skipped = len(days_info) - len(days)
